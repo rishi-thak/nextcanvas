@@ -1,11 +1,16 @@
-//! nextcanvas SWC plugin — the SWC-native replacement for the old Babel plugin.
+//! nextcanvas SWC plugin — the SWC-native source-location stamp.
 //!
 //! Stamps `data-loc="<absFile>:<line>:<col>"` onto host (lowercase) JSX elements
-//! **whose sole child is a static text node** — i.e. exactly the elements the
-//! write-back server can edit. Elements whose child is a `{expression}` (bound
-//! value), or that have mixed/multiple children, are intentionally left
-//! unstamped so the browser overlay won't outline or offer to edit something
-//! whose commit would just bounce (the server can only rewrite a JSXText node).
+//! that carry **at least one static text run the write-back server can edit** —
+//! i.e. an element with one or more non-whitespace `JSXText` direct children.
+//! This covers both plain static text (`<h1>Hello</h1>`) and text mixed with
+//! inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
+//! surrounding text runs are editable and the inline elements are preserved.
+//!
+//! An element with a **direct `{expression}` child** (a bound value) is left
+//! unstamped: its text-node layout is ambiguous, so the overlay won't outline or
+//! offer to edit something whose commit would just bounce. (Expressions nested
+//! *inside* a child element are fine — the child is preserved verbatim.)
 //!
 //! Because it runs inside SWC, it works under **both** the webpack (next-swc)
 //! and Turbopack pipelines — unlike a Babel plugin, which opts Next out of SWC.
@@ -26,17 +31,29 @@ struct DataLocStamper {
     source_map: PluginSourceMapProxy,
 }
 
-/// True only when the element's sole child is a non-whitespace static JSXText —
-/// text the write-back server can actually rewrite. `{expression}` children
-/// (bound values / string literals) and mixed/multiple children return false.
-fn is_single_static_text(children: &[JSXElementChild]) -> bool {
-    if children.len() != 1 {
-        return false;
+/// True when the element has at least one non-whitespace static JSXText direct
+/// child (text the write-back server can rewrite) and **no** direct
+/// `{expression}` / spread child. Plain static text and text mixed with inline
+/// child elements both qualify; a direct bound value disqualifies the element.
+fn has_editable_text(children: &[JSXElementChild]) -> bool {
+    let mut has_text = false;
+    for child in children {
+        match child {
+            JSXElementChild::JSXText(t) => {
+                if !t.value.trim().is_empty() {
+                    has_text = true;
+                }
+            }
+            // A direct bound value makes text-run mapping ambiguous — leave the
+            // whole element unstamped (unchanged behavior for `<h1>{title}</h1>`).
+            JSXElementChild::JSXExprContainer(_) | JSXElementChild::JSXSpreadChild(_) => {
+                return false;
+            }
+            // Nested elements / fragments are preserved verbatim; skip them.
+            _ => {}
+        }
     }
-    match &children[0] {
-        JSXElementChild::JSXText(t) => !t.value.trim().is_empty(),
-        _ => false,
-    }
+    has_text
 }
 
 fn already_stamped(attrs: &[JSXAttrOrSpread]) -> bool {
@@ -64,8 +81,8 @@ impl VisitMut for DataLocStamper {
             _ => return,
         }
 
-        // Only stamp what the overlay can actually edit (see is_single_static_text).
-        if !is_single_static_text(&node.children) {
+        // Only stamp what the overlay can actually edit (see has_editable_text).
+        if !has_editable_text(&node.children) {
             return;
         }
         if already_stamped(&node.opening.attrs) {

@@ -1,7 +1,7 @@
 /**
  * withCanvas() — wraps your Next config to enable nextcanvas in development.
  * Works under BOTH webpack (next-swc) and Turbopack, because the source stamp
- * is an SWC plugin (not Babel) that runs inside Next's own compiler.
+ * is an SWC plugin that runs inside Next's own compiler.
  *
  *   // next.config.js
  *   const { withCanvas } = require('@rishi-thak/nextcanvas/next');

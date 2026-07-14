@@ -22,9 +22,9 @@ npx nextcanvas init
   the write-back server and injects the source-map SWC plugin, dev-only), and
 - **mounts `<NextCanvasOverlay/>`** in your root layout.
 
-Then run `npm run dev`, open the app, and double-click any static text. **No
-`.babelrc`, no `@babel/runtime`** — the source stamp is an SWC plugin, so both
-webpack and Turbopack work.
+Then run `npm run dev`, open the app, and double-click any static text. **Zero
+extra config** — the source stamp is an SWC plugin that runs inside Next's own
+compiler, so both webpack and Turbopack work.
 
 ### Manual setup
 
@@ -80,7 +80,7 @@ double-click text ─▶ overlay reads element's data-loc ─▶ POST :3131/edit
 ## Bundler support
 
 The stamp is an **SWC plugin**, so it runs inside Next's own compiler under both
-bundlers — no `.babelrc`, so `next/font` and other SWC features keep working.
+bundlers — `next/font` and other SWC features keep working.
 
 | Bundler   | Windows                    | macOS / Linux |
 |-----------|----------------------------|---------------|
@@ -96,8 +96,12 @@ but nothing gets stamped, so editing is inactive. On Windows, use
 ## Current scope (MVP)
 
 - ✅ Static JSX text: `<h1>Hello</h1>`
-- ❌ Bound values: `<h1>{title}</h1>` — rejected with an explanatory toast
-- ❌ Elements with mixed children (text + nested elements) — not yet editable
+- ✅ Text mixed with inline elements: `<p>Hello <strong>world</strong>!</p>` —
+  edit the surrounding text runs; the inline elements are locked and preserved
+- ❌ Bound values: `<h1>{title}</h1>` — left unstamped (not editable); an element
+  with a direct `{expression}` child is skipped
+- ⚠️ Structure must stay intact during a mixed edit — deleting an inline element
+  or emptying a whole text run is rejected and reverted with a toast
 - ⚠️ Repeated components (same source line via `.map`) edit the shared source,
   which changes all instances
 

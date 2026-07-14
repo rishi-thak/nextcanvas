@@ -16,6 +16,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   "open a PR"). Past permission does **not** carry over to later turns — each
   action needs its own explicit instruction.
 
+## Communication rules (STRICT)
+
+- **NEVER mention Babel** — its exclusion, removal, non-use, or non-existence — in
+  any user-facing output (docs, README, code comments, commit messages, PR text,
+  responses). Do not write phrases like "no Babel", "no `.babelrc`", "replaces the
+  old Babel plugin", or "instead of Babel". Describe the source-mapping mechanism
+  purely in terms of what it *is* (an SWC plugin), never in contrast to Babel.
+
+## Maintaining this file (STRICT — do it unprompted)
+
+- **Keep CLAUDE.md current as you work — without being asked.** When you learn
+  something durable about this repo (a new constraint, a non-obvious gotcha, a
+  changed workflow, a resolved TODO, a standing user preference, a rule the user
+  states), **update the relevant section of CLAUDE.md in the same turn**, as part
+  of the work. Do not wait for the user to say "add this to CLAUDE.md" — that they
+  had to ask means the rule was already missed.
+- This is editing a tracked file, **not** a version-control action — it is always
+  allowed and never needs the explicit-instruction gate above. (Committing it
+  still does; leave the edit in the working tree per the version-control rules.)
+- Prefer editing the fitting existing section over appending a new one; keep the
+  house style (terse, imperative, "do not re-learn this the hard way"). Fold new
+  facts in rather than duplicating; delete guidance that a change makes wrong.
+- When the user gives feedback or a preference that generalizes beyond the
+  immediate task, capture it here (or in memory if it's cross-project) so it
+  survives the session.
+
 ## What this is
 
 `nextcanvas` is a drop-in dev tool that turns a locally-running **Next.js App
@@ -260,6 +286,39 @@ pulling, run `npm install` (or `npm run build`) inside `nextcanvas/` to rebuild
 
 ## Current scope
 
-Static JSX text only (`<h1>Hello</h1>`). Bound values (`<h1>{title}</h1>`) and
-mixed-children elements are rejected. Repeated components sharing one source line
-(via `.map`) edit the shared source, affecting all instances.
+Static JSX text (`<h1>Hello</h1>`) **and** text mixed with inline child elements
+(`<p>Hello <strong>world</strong>!</p>`), where the surrounding text runs are
+editable and the inline elements are locked + preserved. Bound values
+(`<h1>{title}</h1>`) — any element with a direct `{expression}` child — are left
+unstamped and not editable. Repeated components sharing one source line (via
+`.map`) edit the shared source, affecting all instances.
+
+### Mixed-children edits (the segmented protocol)
+
+The plugin stamps any host element with ≥1 non-whitespace `JSXText` direct child
+and no direct `{expression}`/spread child (`has_editable_text` in `lib.rs`) — this
+generalizes the old single-text rule (a strict subset). For a mixed element the
+overlay sends a `segments` array (one `{oldText,newText}` per non-whitespace text
+run, in source/DOM order) instead of the legacy `{oldText,newText}` pair; the
+server (`applyEdit` in `server.ts`) positionally zips those runs against the
+element's non-whitespace `JSXText` children and rewrites only the changed ones.
+Non-obvious constraints learned building this — **do not re-learn the hard way**:
+
+- **Server must use `getFullText()`/`getFullStart()` for the run nodes**, not
+  `getText()`/`getStart()`: a `JSXText` node's leading whitespace is *trivia* to
+  the trimmed getters, so those clip the run's leading boundary space and produce
+  a double space (`Howdy  <strong>`). Match, span, and replace on the FULL text.
+- **The browser already sends each run's full boundary spacing**, so the server
+  writes segment `newText` **verbatim** (no `rewrap`). `rewrap` is only for the
+  legacy single-text path.
+- **Overlay locks inline children** (`contentEditable=false` + `data-nc-locked`)
+  on dblclick so the caret can't enter them; `unlockChildren` undoes it on blur.
+- **Structure must stay intact during a mixed edit.** On commit the overlay
+  checks the inline child elements are the same nodes in the same order and the
+  run count is unchanged; deleting an inline element or emptying a whole run is
+  rejected and the element is reverted from an `innerHTML` snapshot.
+- **`el.normalize()` before reading runs** so browser-split text nodes collapse to
+  one node per run, keeping the run count stable/aligned with the source.
+
+Legacy single-text payloads still work unchanged (overlay sends `oldText/newText`
+when the element has no child elements; server falls through to the old path).

@@ -6,8 +6,11 @@
  * AST edit (ts-morph). Next.js Fast Refresh then reflects the change in the
  * browser automatically, so there is no server -> client channel to maintain.
  *
- * MVP scope: static JSX text only, e.g. <h1>Hello</h1>. Bound expressions such
- * as <h1>{title}</h1> are rejected with a clear message.
+ * Scope: static JSX text, whether an element's whole child (<h1>Hello</h1>) or
+ * text runs mixed with inline child elements (<p>Hello <strong>w</strong>!</p>).
+ * The latter arrive as a `segments` array; the inline elements are preserved and
+ * only the text runs are rewritten. Bound expressions such as <h1>{title}</h1>
+ * are left unstamped and never reach here.
  */
 
 import http from 'http';
@@ -18,12 +21,21 @@ import type { IncomingMessage, ServerResponse } from 'http';
 export const PORT = Number(process.env.NEXTCANVAS_PORT || 3131);
 const OVERLAY_PATH = path.join(__dirname, 'overlay.js');
 
+interface Segment {
+  oldText: string;
+  newText: string;
+}
+
 interface Edit {
   fileName: string;
   lineNumber?: number;
   columnNumber?: number;
-  oldText: string;
-  newText: string;
+  // Legacy single-text edit (element whose sole child is static text).
+  oldText?: string;
+  newText?: string;
+  // Mixed-children edit: one entry per non-whitespace text run of the element,
+  // in source/DOM order. Present instead of oldText/newText.
+  segments?: Segment[];
 }
 
 interface EditResult {
@@ -53,7 +65,7 @@ export function applyEdit(edit: Edit): EditResult {
   const { Project, SyntaxKind } =
     require('ts-morph') as typeof import('ts-morph');
 
-  const { fileName, lineNumber, oldText, newText } = edit;
+  const { fileName, lineNumber, columnNumber, oldText, newText } = edit;
   if (!fileName) return { ok: false, error: 'missing fileName' };
 
   const project = new Project({
@@ -68,6 +80,96 @@ export function applyEdit(edit: Edit): EditResult {
   // source text node may be wrapped across several indented lines. Trimming
   // alone isn't enough — we must normalize interior whitespace on both sides.
   const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
+
+  // Re-insert a JSXText node's original leading/trailing whitespace around new
+  // core text, so indentation/wrapping is preserved on write-back.
+  const rewrap = (fullText: string, core: string): string => {
+    const leading = /^\s*/.exec(fullText)?.[0] ?? '';
+    const trailing = /\s*$/.exec(fullText)?.[0] ?? '';
+    return leading + core + trailing;
+  };
+
+  // Mixed-children edit: rewrite the element's text runs, preserving its inline
+  // child elements. Located by the data-loc line (the opening tag's line).
+  if (edit.segments && edit.segments.length) {
+    const els = sourceFile
+      .getDescendantsOfKind(SyntaxKind.JsxElement)
+      .filter(
+        (el) => el.getOpeningElement().getStartLineNumber() === Number(lineNumber)
+      );
+    if (els.length === 0) {
+      return {
+        ok: false,
+        error: `Could not find an element at ${fileName}:${lineNumber} to edit.`,
+      };
+    }
+    // Disambiguate multiple elements on the same line by opening-tag column.
+    let element = els[0];
+    if (els.length > 1 && columnNumber) {
+      const byCol = els.find(
+        (el) =>
+          sourceFile.getLineAndColumnAtPos(el.getOpeningElement().getStart())
+            .column === Number(columnNumber)
+      );
+      if (byCol) element = byCol;
+    }
+
+    // Direct, non-whitespace JSXText children in source order — these align 1:1
+    // with the non-whitespace runs the overlay sends (whitespace-only text is
+    // dropped on both sides, so positions match). Use getFullText/getFullStart:
+    // a JSXText node's leading whitespace is trivia to getText()/getStart(), so
+    // those would clip the run's leading boundary space.
+    const runs = element
+      .getJsxChildren()
+      .filter(
+        (c) => c.getKind() === SyntaxKind.JsxText && norm(c.getFullText()) !== ''
+      );
+    const segments = edit.segments;
+    if (runs.length !== segments.length) {
+      return {
+        ok: false,
+        error: `Text structure changed (source has ${runs.length} text run(s), edit has ${segments.length}); only in-place text edits are supported.`,
+      };
+    }
+    for (let i = 0; i < runs.length; i++) {
+      if (norm(runs[i].getFullText()) !== norm(segments[i].oldText)) {
+        return {
+          ok: false,
+          error: `Edit no longer matches the source (run ${i + 1}); reload and try again.`,
+        };
+      }
+    }
+    // Collect changed runs as absolute [start,end] replacements, then apply from
+    // last to first so earlier offsets stay valid (no stale node references).
+    // The browser sends each run's full text-node value, which already carries
+    // the boundary spacing around inline elements — so write it verbatim (no
+    // rewrap). A source run wrapped across indented lines collapses onto one
+    // line, matching the single-text path.
+    const patches = runs
+      .map((node, i) => ({ node, seg: segments[i] }))
+      .filter(({ seg }) => norm(seg.oldText) !== norm(seg.newText))
+      .map(({ node, seg }) => ({
+        start: node.getFullStart(),
+        end: node.getEnd(),
+        text: String(seg.newText),
+      }))
+      .sort((a, b) => b.start - a.start);
+
+    if (patches.length === 0) {
+      return { ok: true, fileName, lineNumber, oldText: '', newText: '' };
+    }
+    for (const p of patches) sourceFile.replaceText([p.start, p.end], p.text);
+    sourceFile.saveSync();
+    return {
+      ok: true,
+      fileName,
+      lineNumber,
+      oldText: segments.map((s) => s.oldText).join(' | '),
+      newText: segments.map((s) => s.newText).join(' | '),
+    };
+  }
+
+  if (oldText == null) return { ok: false, error: 'missing oldText' };
   const wanted = norm(String(oldText));
 
   const candidates = sourceFile
@@ -105,10 +207,7 @@ export function applyEdit(edit: Edit): EditResult {
   // Preserve the node's leading/trailing whitespace (its indentation) and
   // replace the whole text core. This works for single-line text and for
   // multi-line wrapped text alike (the latter collapses onto one line).
-  const full = target.getText();
-  const leading = /^\s*/.exec(full)?.[0] ?? '';
-  const trailing = /\s*$/.exec(full)?.[0] ?? '';
-  target.replaceWithText(leading + String(newText) + trailing);
+  target.replaceWithText(rewrap(target.getText(), String(newText)));
   sourceFile.saveSync();
 
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
