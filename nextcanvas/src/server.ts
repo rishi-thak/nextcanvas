@@ -36,6 +36,9 @@ interface Edit {
   // Mixed-children edit: one entry per non-whitespace text run of the element,
   // in source/DOM order. Present instead of oldText/newText.
   segments?: Segment[];
+  // When present, this is an attribute edit (e.g. src/href/alt) rather than a
+  // JSX text edit; oldText/newText carry the attribute's string-literal value.
+  attrName?: string;
 }
 
 interface EditResult {
@@ -213,6 +216,73 @@ export function applyEdit(edit: Edit): EditResult {
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
 }
 
+/**
+ * Apply a single attribute edit (e.g. `src`, `href`, `alt`) to a source file.
+ * Only string-literal attribute values are editable; a `{expression}` value is
+ * left alone (the overlay never stamps those, but we guard here too).
+ */
+export function applyAttrEdit(edit: Edit): EditResult {
+  const { Project, SyntaxKind, Node } =
+    require('ts-morph') as typeof import('ts-morph');
+
+  const { fileName, lineNumber, attrName, oldText, newText } = edit;
+  if (!fileName) return { ok: false, error: 'missing fileName' };
+  if (!attrName) return { ok: false, error: 'missing attrName' };
+
+  const project = new Project({
+    compilerOptions: { allowJs: true, jsx: 4 /* preserve */ },
+    skipAddingFilesFromTsConfig: true,
+  });
+  const sourceFile = project.addSourceFileAtPath(fileName);
+
+  // Every JSX attribute (covers both <el a="…"> and self-closing <img a="…"/>)
+  // named `attrName` whose value is a string literal equal to oldText.
+  const wanted = String(oldText);
+  const candidates = sourceFile
+    .getDescendantsOfKind(SyntaxKind.JsxAttribute)
+    .filter((attr) => attr.getNameNode().getText() === attrName)
+    .filter((attr) => {
+      const init = attr.getInitializer();
+      return (
+        init != null &&
+        Node.isStringLiteral(init) &&
+        init.getLiteralValue() === wanted
+      );
+    });
+
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      error: `Could not find ${attrName}="${wanted}" in ${fileName}. It may be a bound value ({expr}) rather than a string literal.`,
+    };
+  }
+
+  // Prefer the attribute whose enclosing tag opens on the reported line (this is
+  // the line the SWC plugin stamped); fall back to the sole candidate.
+  let target = candidates.find(
+    (attr) => attr.getParentOrThrow().getStartLineNumber() === Number(lineNumber)
+  );
+  if (!target) {
+    if (candidates.length > 1) {
+      return {
+        ok: false,
+        error: `Ambiguous edit: ${attrName}="${wanted}" appears ${candidates.length} times and no element matched line ${lineNumber}.`,
+      };
+    }
+    target = candidates[0];
+  }
+
+  const init = target.getInitializerOrThrow();
+  if (!Node.isStringLiteral(init)) {
+    return { ok: false, error: `${attrName} is not a string literal` };
+  }
+  // setLiteralValue preserves the original quote character and escapes as needed.
+  init.setLiteralValue(String(newText));
+  sourceFile.saveSync();
+
+  return { ok: true, fileName, lineNumber, oldText: wanted, newText };
+}
+
 function handler(req: IncomingMessage, res: ServerResponse): void {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.method === 'GET' && req.url === '/health') {
@@ -252,7 +322,7 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
       return send(res, 400, { ok: false, error: 'invalid JSON' });
     }
     try {
-      const result = applyEdit(edit);
+      const result = edit.attrName ? applyAttrEdit(edit) : applyEdit(edit);
       const status = result.ok ? 200 : 422;
       if (result.ok) {
         console.log(
