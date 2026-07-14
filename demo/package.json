@@ -9,12 +9,12 @@
     "start": "next start"
   },
   "dependencies": {
-    "@rishi-thak/nextcanvas": "file:../nextcanvas",
     "next": "^16.2.10",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@rishi-thak/nextcanvas": "^0.0.4",
     "@types/node": "^20.19.43",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
