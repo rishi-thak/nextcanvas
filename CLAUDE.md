@@ -215,6 +215,33 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
 - **The overlay defers init to `DOMContentLoaded`** — Next injects `main-app.js`
   as `async` in `<head>`, before `<body>` exists; touching `document.body` at load
   time throws and silently aborts the whole overlay.
+- **The "Buttons" toolbar toggle gates all page interactivity.** OFF (the
+  default, "edit mode") makes the page inert: the document-level capture click
+  handler `preventDefault()`s **and** `stopPropagation()`s every non-UI click, so
+  links don't navigate, in-page anchors don't scroll, and the app's own `onClick`
+  handlers don't fire — this is what lets you single-click to select for styling
+  and double-click to edit without a stamped `<a href="#anchor">` scrolling the
+  element out from under you. ON ("live mode") makes the overlay passive for
+  clicks (early `return` before `preventDefault`), so the app behaves normally and
+  single-click does **not** select. Persisted as `nextcanvas:buttons` (`on`/`off`)
+  in localStorage; toggling ON also drops any current style selection. Hover
+  outlines, the attr chip, and double-click editing stay available in both modes.
+- **Editable attributes come in two flavors, stamped separately.** The plugin
+  emits `data-nc-attrs` for string-literal attrs (`href="/x"`) and `data-nc-bound`
+  for bound *simple-identifier* attrs (`href={GITHUB}`). Both raise the attr chip;
+  the panel tags bound rows with a `var` badge. A literal edit rewrites in place.
+  Committing a **bound** edit prompts (a bar inside the panel) for scope: **all
+  references** rewrites the variable's declaration (`const GITHUB = '…'`, via
+  ts-morph `sourceFile.getVariableDeclaration`), affecting every element that uses
+  it; **just this one** leaves the variable alone and inlines a literal on this
+  element (`href={GITHUB}` → `href="new"`, via `JsxAttribute.setInitializer`). The
+  choice rides the `AttrChange`/`StagedEdit` so it survives manual-mode Save. Only
+  bare identifiers are offered — `href={cfg.url}` / `href={fn()}` aren't stamped
+  (the server can't resolve them to one string decl); an identifier imported from
+  another module fails "all" with a hint to use "just this one". **Undo of a
+  "just this one" edit is best-effort:** it's a one-way bound→literal transform
+  (the identifier is gone from source), so reversing it can't restore `{GITHUB}`
+  and may just error-toast — the forward edit is the supported path.
 - **Parse `data-loc` from the right** (`lastIndexOf(':')`) so Windows drive
   letters (`C:\...`) don't corrupt the split.
 - **Port is single-sourced via `NEXTCANVAS_PORT`.** `src/server.ts` derives
@@ -296,12 +323,17 @@ preserved. Bound values (`<h1>{title}</h1>`) — any element with a direct
 sharing one source line (via `.map`) edit the shared source, affecting all
 instances.
 
-**Attribute editing.** Whitelisted string-literal JSX attributes (`src`, `href`,
-`alt`, `title`, `placeholder`, `aria-label`) via a hover chip + attribute panel.
-The plugin lists an element's editable attrs in `data-nc-attrs` (string literals
-only, never `{expr}` bindings — both look identical in the DOM), and the overlay
-edits exactly those. Written by `applyAttrEdit` in `server.ts` (`POST /edit`
-with `attrName`); `setLiteralValue` preserves the original quoting.
+**Attribute editing.** Whitelisted JSX attributes (`src`, `href`, `alt`,
+`title`, `placeholder`, `aria-label`) via a hover chip + attribute panel, in two
+flavors the plugin stamps separately: `data-nc-attrs` for string literals
+(`href="/x"`) and `data-nc-bound` for bound *simple-identifier* values
+(`href={GITHUB}`). Literal edits rewrite in place (`applyAttrEdit`,
+`setLiteralValue` preserves quoting). Bound edits prompt for scope — **all
+references** rewrites the variable's `const` declaration; **just this one**
+inlines a literal on that element only (`applyBoundAttrEdit`, `POST /edit` with
+`attrName` + `bound` + `scope`). Bare identifiers only; member/call expressions
+aren't offered. Both look identical in the DOM, so the split stamping is what
+lets the overlay treat them correctly.
 
 **Style editing.** Single-click selects any stamped element and opens the style
 panel (color / background / font-size / font-weight / text-align / padding),

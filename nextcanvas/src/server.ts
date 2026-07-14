@@ -39,6 +39,11 @@ interface Edit {
   // When present, this is an attribute edit (e.g. src/href/alt) rather than a
   // JSX text edit; oldText/newText carry the attribute's string-literal value.
   attrName?: string;
+  // Bound-identifier attribute (`href={VAR}`). `scope` decides whether to rewrite
+  // the shared variable's declaration ('all') or inline a string literal on just
+  // this element ('one'). Ignored unless `attrName` is also set.
+  bound?: boolean;
+  scope?: 'all' | 'one';
 }
 
 interface StyleEdit {
@@ -247,6 +252,10 @@ export function applyAttrEdit(edit: Edit): EditResult {
   });
   const sourceFile = project.addSourceFileAtPath(fileName);
 
+  if (edit.bound) {
+    return applyBoundAttrEdit(edit, sourceFile);
+  }
+
   // Every JSX attribute (covers both <el a="…"> and self-closing <img a="…"/>)
   // named `attrName` whose value is a string literal equal to oldText.
   const wanted = String(oldText);
@@ -293,6 +302,87 @@ export function applyAttrEdit(edit: Edit): EditResult {
   sourceFile.saveSync();
 
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
+}
+
+/**
+ * Edit a bound-identifier attribute (`href={GITHUB}`), stamped by the plugin as
+ * `data-nc-bound`. Two modes, chosen by `edit.scope`:
+ *   - 'all': rewrite the shared variable's declaration (`const GITHUB = '…'`),
+ *     which changes every element that references it.
+ *   - 'one': leave the variable alone and inline a literal on just this element
+ *     (`href={GITHUB}` → `href="new"`).
+ *
+ * The target attribute is located by tag line (the `data-loc` line) among
+ * attributes named `attrName` whose initializer is a `{identifier}` expression.
+ */
+function applyBoundAttrEdit(
+  edit: Edit,
+  sourceFile: import('ts-morph').SourceFile
+): EditResult {
+  const { SyntaxKind, Node } = require('ts-morph') as typeof import('ts-morph');
+  const { fileName, lineNumber, attrName, oldText, newText, scope } = edit;
+
+  const candidates = sourceFile
+    .getDescendantsOfKind(SyntaxKind.JsxAttribute)
+    .filter((attr) => attr.getNameNode().getText() === attrName)
+    .filter((attr) => {
+      const init = attr.getInitializer();
+      if (init == null || !Node.isJsxExpression(init)) return false;
+      const expr = init.getExpression();
+      return expr != null && Node.isIdentifier(expr);
+    });
+
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      error: `Could not find a bound ${attrName}={…} in ${fileName}.`,
+    };
+  }
+
+  let target = candidates.find(
+    (attr) => attr.getParentOrThrow().getStartLineNumber() === Number(lineNumber)
+  );
+  if (!target) {
+    if (candidates.length > 1) {
+      return {
+        ok: false,
+        error: `Ambiguous edit: ${attrName}={…} appears ${candidates.length} times and no element matched line ${lineNumber}.`,
+      };
+    }
+    target = candidates[0];
+  }
+
+  if (scope === 'one') {
+    // Inline a literal on just this element. JSON.stringify yields a safely
+    // escaped double-quoted string, turning `href={GITHUB}` into `href="new"`.
+    target.setInitializer(JSON.stringify(String(newText)));
+    sourceFile.saveSync();
+    return { ok: true, fileName, lineNumber, oldText, newText };
+  }
+
+  // scope === 'all' (default): rewrite the variable the identifier points at.
+  const init = target.getInitializerOrThrow();
+  if (!Node.isJsxExpression(init)) {
+    return { ok: false, error: `${attrName} is not a bound expression` };
+  }
+  const idName = init.getExpressionOrThrow().getText();
+  const decl = sourceFile.getVariableDeclaration(idName);
+  if (!decl) {
+    return {
+      ok: false,
+      error: `Could not resolve variable "${idName}" in ${fileName} — it may be imported from another module. Try "just this one" instead.`,
+    };
+  }
+  const declInit = decl.getInitializer();
+  if (declInit == null || !Node.isStringLiteral(declInit)) {
+    return {
+      ok: false,
+      error: `Variable "${idName}" is not a plain string literal, so it can't be edited safely. Try "just this one" instead.`,
+    };
+  }
+  declInit.setLiteralValue(String(newText));
+  sourceFile.saveSync();
+  return { ok: true, fileName, lineNumber, oldText, newText };
 }
 
 /** A single-quoted JS string literal, safe for arbitrary CSS values. */

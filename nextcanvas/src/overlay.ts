@@ -50,6 +50,10 @@ interface AttrChange {
   attr: string;
   before: string;
   after: string;
+  // Set for a bound-identifier attr (`href={VAR}`). `scope` records the user's
+  // choice: 'all' rewrites the shared variable, 'one' inlines a literal here.
+  bound?: boolean;
+  scope?: 'all' | 'one';
 }
 
 // A style edit: one inline style property. `before` is the element's prior
@@ -166,6 +170,10 @@ whenBodyReady(function initNextCanvas(): void {
   let hidden = lsGet('nextcanvas:hidden') === '1';
   // Fully dismissed for this session — hides the whole UI, logo included.
   let dismissed = ssGet('nextcanvas:dismissed') === '1';
+  // "Buttons" toggle. OFF (default) = edit mode: the page is inert so clicks
+  // don't navigate/scroll/fire handlers, letting you select and edit freely.
+  // ON = live mode: the app behaves normally. Persisted across sessions.
+  let buttonsEnabled = lsGet('nextcanvas:buttons') === 'on';
 
   const undoStack: Change[] = [];
   const redoStack: Change[] = [];
@@ -179,6 +187,10 @@ whenBodyReady(function initNextCanvas(): void {
     attr?: string;
     oldRuns: string[];
     mixed: boolean;
+    // Set for a bound-identifier attr, carrying the user's all/one choice so a
+    // manual-mode Save writes it through the same bound path as autosave.
+    bound?: boolean;
+    scope?: 'all' | 'one';
   }
   const staged = new Map<string, StagedEdit>();
   function stageKey(source: NextCanvasSource, attr?: string): string {
@@ -288,26 +300,33 @@ whenBodyReady(function initNextCanvas(): void {
   // (space-separated) — the ones that are string literals in source. We must NOT
   // infer this from the DOM: a bound `href={x}` and a literal `href="/x"` both
   // render as a resolved value, so guessing would offer edits that just bounce.
-  function editableAttrs(el: HTMLElement): Array<{ name: string; value: string }> {
-    const raw = el.getAttribute('data-nc-attrs');
-    if (!raw) return [];
-    const out: Array<{ name: string; value: string }> = [];
-    for (const name of raw.split(/\s+/)) {
-      if (!name) continue;
-      // getAttribute returns the raw source value (e.g. "/a.png"), not the
-      // resolved property (img.src would be an absolute URL) — what we must edit.
-      out.push({ name, value: el.getAttribute(name) ?? '' });
-    }
+  function editableAttrs(
+    el: HTMLElement
+  ): Array<{ name: string; value: string; bound: boolean }> {
+    const out: Array<{ name: string; value: string; bound: boolean }> = [];
+    const add = (raw: string | null, bound: boolean): void => {
+      if (!raw) return;
+      for (const name of raw.split(/\s+/)) {
+        if (!name) continue;
+        // getAttribute returns the raw source value for a literal (e.g. "/a.png")
+        // and the resolved string for a bound one (`href={GITHUB}` → the URL);
+        // both are exactly the string we compare against / edit.
+        out.push({ name, value: el.getAttribute(name) ?? '', bound });
+      }
+    };
+    add(el.getAttribute('data-nc-attrs'), false);
+    add(el.getAttribute('data-nc-bound'), true);
     return out;
   }
 
-  // Nearest ancestor (incl. self) that has editable attrs. We match on
-  // `data-nc-attrs` — not `data-loc` — so a stamped-but-attr-less child (e.g. a
-  // <span> inside <a href="…">) doesn't shadow the link's editable href.
+  // Nearest ancestor (incl. self) with an editable attr — literal (`data-nc-attrs`)
+  // or bound (`data-nc-bound`). Matching these (not `data-loc`) means a
+  // stamped-but-attr-less child (e.g. a <span> inside <a href="…">) doesn't
+  // shadow the link's editable href.
   function attrHost(el: EventTarget | null): HTMLElement | null {
     if (!(el instanceof Element)) return null;
     if (inUI(el)) return null;
-    const node = el.closest('[data-nc-attrs]');
+    const node = el.closest('[data-nc-attrs], [data-nc-bound]');
     return node instanceof HTMLElement ? node : null;
   }
 
@@ -379,6 +398,23 @@ whenBodyReady(function initNextCanvas(): void {
     }
     .nc-btn:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
     .nc-btn:disabled { opacity: .35; cursor: default; }
+    .nc-switch {
+      display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+      font-size: 12px; font-weight: 600; color: #a2a2b4; white-space: nowrap;
+      user-select: none; padding: 0 4px;
+    }
+    .nc-switch.nc-on { color: #f5f5f7; }
+    .nc-switch-track {
+      position: relative; width: 34px; height: 18px; border-radius: 999px;
+      background: rgba(255,255,255,0.18); transition: background .15s ease;
+    }
+    .nc-switch-knob {
+      position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+      border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4);
+      transition: transform .15s ease;
+    }
+    .nc-switch.nc-on .nc-switch-track { background: #6d28d9; }
+    .nc-switch.nc-on .nc-switch-knob { transform: translateX(16px); }
     .nc-save {
       display: inline-flex; align-items: center; gap: 6px; border: 0;
       background: #6d28d9; color: #fff; font: inherit; font-weight: 600;
@@ -429,6 +465,24 @@ whenBodyReady(function initNextCanvas(): void {
       max-width: 100%; max-height: 80px; border-radius: 6px; margin-top: 6px;
       display: block; background: rgba(255,255,255,0.04);
     }
+    .nc-attr-row .nc-bound-tag {
+      display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 600;
+      color: #a78bfa; background: rgba(167,139,250,0.14); border-radius: 4px;
+      padding: 0 5px; vertical-align: middle;
+    }
+    .nc-scope {
+      margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.12);
+    }
+    .nc-scope-msg { color: #d5d5df; margin-bottom: 8px; }
+    .nc-scope-btns { display: flex; gap: 6px; }
+    .nc-scope-btns button {
+      flex: 1; border: 1px solid rgba(255,255,255,0.14); border-radius: 6px;
+      padding: 6px 8px; font: inherit; cursor: pointer; color: #f5f5f7;
+      background: rgba(255,255,255,0.06);
+    }
+    .nc-scope-btns button:hover { background: rgba(255,255,255,0.12); }
+    .nc-scope-btns button[data-scope="all"] { background: #6d28d9; border-color: transparent; }
+    .nc-scope-btns button[data-scope="all"]:hover { background: #7c3aed; }
     .nextcanvas-selected {
       position: fixed; pointer-events: none; z-index: 2147483644;
       border: 1.5px dashed #a78bfa; border-radius: 3px;
@@ -557,6 +611,10 @@ whenBodyReady(function initNextCanvas(): void {
         <button class="nc-mode" data-mode="manual" title="Stage edits, then click Save">Manual</button>
       </div>
       <div class="nc-actions">
+        <span class="nc-switch" data-act="buttons">
+          <span class="nc-switch-text">Buttons</span>
+          <span class="nc-switch-track"><span class="nc-switch-knob"></span></span>
+        </span>
         <button class="nc-btn" data-act="undo" title="Undo (Ctrl/Cmd+Z)">↶</button>
         <button class="nc-btn" data-act="redo" title="Redo (Ctrl/Cmd+Shift+Z)">↷</button>
         <button class="nc-save" data-act="save" title="Write staged changes to source">Save <span class="nc-badge">0</span></button>
@@ -571,6 +629,7 @@ whenBodyReady(function initNextCanvas(): void {
   const q = <T extends HTMLElement>(sel: string): T => ui.querySelector(sel) as T;
   const barEl = q('.nc-bar');
   const fabEl = q('.nc-fab');
+  const buttonsBtn = q('[data-act="buttons"]');
   const undoBtn = q<HTMLButtonElement>('[data-act="undo"]');
   const redoBtn = q<HTMLButtonElement>('[data-act="redo"]');
   const saveBtn = q<HTMLButtonElement>('[data-act="save"]');
@@ -607,6 +666,10 @@ whenBodyReady(function initNextCanvas(): void {
     ui.querySelectorAll('.nc-mode').forEach((b) =>
       b.classList.toggle('nc-on', b.getAttribute('data-mode') === mode)
     );
+    buttonsBtn.classList.toggle('nc-on', buttonsEnabled);
+    buttonsBtn.title = buttonsEnabled
+      ? 'Buttons: on — links, scrolling and click handlers work (click to turn off for editing)'
+      : 'Buttons: off — page is inert so you can edit freely (click to turn on)';
   }
 
   // ---- server write --------------------------------------------------------
@@ -646,12 +709,16 @@ whenBodyReady(function initNextCanvas(): void {
     return postEdit({ ...base, segments });
   }
 
-  // Write a string-literal attribute edit (server dispatches on `attrName`).
+  // Write an attribute edit (server dispatches on `attrName`). For a bound
+  // attr (`href={VAR}`) we pass `bound` + the chosen `scope` so the server
+  // either rewrites the shared variable ('all') or inlines a literal ('one').
   function writeAttr(
     source: NextCanvasSource,
     attr: string,
     oldText: string,
-    newText: string
+    newText: string,
+    bound?: boolean,
+    scope?: 'all' | 'one'
   ): Promise<{ ok: boolean; error?: string }> {
     return postEdit({
       fileName: source.fileName,
@@ -660,6 +727,7 @@ whenBodyReady(function initNextCanvas(): void {
       attrName: attr,
       oldText,
       newText,
+      ...(bound ? { bound: true, scope } : {}),
     });
   }
 
@@ -673,12 +741,12 @@ whenBodyReady(function initNextCanvas(): void {
   // Source write in the forward (before→after) or reverse (after→before) sense.
   function writeForward(c: EditChange): Promise<{ ok: boolean; error?: string }> {
     return c.kind === 'attr'
-      ? writeAttr(c.source, c.attr, c.before, c.after)
+      ? writeAttr(c.source, c.attr, c.before, c.after, c.bound, c.scope)
       : writeText(c.source, c.before, c.after, c.mixed);
   }
   function writeReverse(c: EditChange): Promise<{ ok: boolean; error?: string }> {
     return c.kind === 'attr'
-      ? writeAttr(c.source, c.attr, c.after, c.before)
+      ? writeAttr(c.source, c.attr, c.after, c.before, c.bound, c.scope)
       : writeText(c.source, c.after, c.before, c.mixed);
   }
   // Restore the change's element to one of its ends in the live DOM.
@@ -697,7 +765,7 @@ whenBodyReady(function initNextCanvas(): void {
     staged.set(
       key,
       c.kind === 'attr'
-        ? { el: c.el, source: c.source, kind: 'attr', attr: c.attr, oldRuns: [c.before], mixed: false }
+        ? { el: c.el, source: c.source, kind: 'attr', attr: c.attr, oldRuns: [c.before], mixed: false, bound: c.bound, scope: c.scope }
         : { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed }
     );
   }
@@ -848,7 +916,8 @@ whenBodyReady(function initNextCanvas(): void {
       if (s.attr) {
         const cur = s.el.getAttribute(s.attr) ?? '';
         const attr = s.attr;
-        jobs.push(() => writeAttr(s.source, attr, s.oldRuns[0], cur));
+        const { bound, scope } = s;
+        jobs.push(() => writeAttr(s.source, attr, s.oldRuns[0], cur, bound, scope));
       } else {
         const cur = readRuns(s.el);
         jobs.push(() => writeText(s.source, s.oldRuns, cur, s.mixed));
@@ -893,6 +962,14 @@ whenBodyReady(function initNextCanvas(): void {
     refreshUI();
   }
 
+  function setButtons(on: boolean): void {
+    buttonsEnabled = on;
+    lsSet('nextcanvas:buttons', on ? 'on' : 'off');
+    // Leaving edit mode drops any current style selection.
+    if (on) deselect();
+    refreshUI();
+  }
+
   function setDismissed(d: boolean): void {
     dismissed = d;
     ssSet('nextcanvas:dismissed', d ? '1' : '0');
@@ -916,6 +993,7 @@ whenBodyReady(function initNextCanvas(): void {
     if (act === 'undo') undo();
     else if (act === 'redo') redo();
     else if (act === 'save') void save();
+    else if (act === 'buttons') setButtons(!buttonsEnabled);
     else if (act === 'hide') setHidden(true);
     else if (act === 'show') setHidden(false);
     else if (act === 'dismiss') setDismissed(true);
@@ -966,9 +1044,10 @@ whenBodyReady(function initNextCanvas(): void {
           a.name === 'src'
             ? `<img class="nc-thumb" alt="" src="${escapeAttr(a.value)}" />`
             : '';
+        const tag = a.bound ? `<span class="nc-bound-tag" title="Bound to a variable">var</span>` : '';
         return `<div class="nc-attr-row">
-            <label>${a.name}</label>
-            <input data-attr="${a.name}" value="${escapeAttr(a.value)}" spellcheck="false" autocomplete="off" />
+            <label>${a.name}${tag}</label>
+            <input data-attr="${a.name}" data-bound="${a.bound ? '1' : '0'}" value="${escapeAttr(a.value)}" spellcheck="false" autocomplete="off" />
             ${thumb}
           </div>`;
       })
@@ -997,26 +1076,79 @@ whenBodyReady(function initNextCanvas(): void {
   }
 
   function closePanel(): void {
+    if (cancelScope) cancelScope();
     attrPanel.style.display = 'none';
     panelOpen = false;
     panelTarget = null;
   }
 
-  function commitAttrInput(input: HTMLInputElement): void {
+  // A bound attr resolves to a shared variable, so committing it asks whether to
+  // rewrite that variable (all references) or inline a literal here (just this
+  // one). The choice is presented as a bar inside the panel; `scopeAsking` guards
+  // re-entrancy (focusout fires when the buttons take focus) and closePanel
+  // cancels a pending ask so `scopeAsking` never gets stuck.
+  let scopeAsking = false;
+  let cancelScope: (() => void) | null = null;
+
+  function askScopeInPanel(): Promise<'all' | 'one' | null> {
+    return new Promise((resolve) => {
+      const bar = document.createElement('div');
+      bar.className = 'nc-scope';
+      bar.innerHTML = `<div class="nc-scope-msg">This value comes from a shared variable. Apply your change to…</div>
+        <div class="nc-scope-btns">
+          <button type="button" data-scope="all">All references</button>
+          <button type="button" data-scope="one">Just this one</button>
+        </div>`;
+      const finish = (v: 'all' | 'one' | null): void => {
+        cancelScope = null;
+        bar.remove();
+        if (panelOpen && panelTarget) positionPanel(panelTarget);
+        resolve(v);
+      };
+      cancelScope = () => finish(null);
+      bar.addEventListener('click', (e) => {
+        const b = (e.target as HTMLElement).closest('[data-scope]');
+        if (!b) return;
+        e.preventDefault();
+        e.stopPropagation();
+        finish(b.getAttribute('data-scope') as 'all' | 'one');
+      });
+      attrPanel.appendChild(bar);
+      if (panelTarget) positionPanel(panelTarget);
+    });
+  }
+
+  async function commitAttrInput(input: HTMLInputElement): Promise<void> {
     if (!panelTarget) return;
     const name = input.dataset.attr;
     if (!name) return;
+    const bound = input.dataset.bound === '1';
     const oldVal = input.dataset.old ?? '';
     const newVal = input.value;
     if (newVal === oldVal) return;
 
-    const source = getSource(panelTarget);
+    const target = panelTarget; // capture — closePanel may run while we await
+    const source = getSource(target);
     if (!source) {
       input.value = oldVal;
       toast('Lost source info; edit reverted', true);
       return;
     }
-    applyValue(panelTarget, name, newVal); // instant visual feedback
+
+    let scope: 'all' | 'one' | undefined;
+    if (bound) {
+      if (scopeAsking) return;
+      scopeAsking = true;
+      const choice = await askScopeInPanel();
+      scopeAsking = false;
+      if (!choice) {
+        input.value = oldVal;
+        return;
+      }
+      scope = choice;
+    }
+
+    applyValue(target, name, newVal); // instant visual feedback
     input.dataset.old = newVal; // so a following blur won't re-commit
     if (name === 'src') {
       const thumb = attrPanel.querySelector('.nc-thumb') as HTMLImageElement | null;
@@ -1025,7 +1157,15 @@ whenBodyReady(function initNextCanvas(): void {
         thumb.src = newVal;
       }
     }
-    commit({ kind: 'attr', el: panelTarget, source, attr: name, before: oldVal, after: newVal });
+    commit({
+      kind: 'attr',
+      el: target,
+      source,
+      attr: name,
+      before: oldVal,
+      after: newVal,
+      ...(bound ? { bound: true, scope } : {}),
+    });
   }
 
   chip.addEventListener('click', (e) => {
@@ -1282,15 +1422,23 @@ whenBodyReady(function initNextCanvas(): void {
   );
   window.addEventListener('resize', drawSelOutline);
 
-  // Single-click selects a stamped element for styling (double-click still
-  // enters text editing; the two coexist — selecting is harmless). Clicking
-  // empty space or a non-stamped element deselects.
+  // Click behavior depends on the "Buttons" toggle:
+  //  - Buttons OFF (edit mode, default): the page is inert — every non-UI click
+  //    is prevented AND its propagation stopped, so links don't navigate, in-page
+  //    anchors don't scroll, and the app's own onClick handlers don't fire. This
+  //    is what lets you single-click to select for styling and double-click to
+  //    edit text without the element navigating out from under you.
+  //  - Buttons ON (live mode): the overlay stays out of the way so the app behaves
+  //    normally; single-click does not select (use edit mode for that).
   document.addEventListener(
     'click',
     (e) => {
       const el = e.target;
       if (inUI(el)) return;
       if (el instanceof HTMLElement && el.isContentEditable) return;
+      if (buttonsEnabled) return;
+      e.preventDefault();
+      e.stopPropagation();
       if (isStylableEl(el)) selectEl(el);
       else deselect();
     },
