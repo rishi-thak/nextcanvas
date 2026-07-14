@@ -1,6 +1,6 @@
 {
   "name": "@rishi-thak/nextcanvas",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publishConfig": {
     "access": "public"
   },
@@ -20,7 +20,8 @@
       "types": "./dist/next.d.ts",
       "default": "./dist/next.js"
     },
-    "./overlay": "./dist/overlay.js"
+    "./overlay": "./dist/overlay.js",
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
