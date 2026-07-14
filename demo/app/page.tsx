@@ -228,7 +228,7 @@ export default function Home() {
               <h3>SWC plugin, both bundlers</h3>
               <p>
                 The source stamp runs inside SWC, so webpack and Turbopack both
-                work. No Babel, no lost next/font.
+                work. Zero extra config, next/font intact.
               </p>
             </div>
             <div className="card">
