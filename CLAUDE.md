@@ -326,6 +326,17 @@ helpers (`writeForward`/`writeReverse`, `applyChangeDom`, `keyFor`,
 colliding with the style panel's `nc-*` / `panel` (both features independently
 added a `.nc-panel` + `const panel`; keep them distinct).
 
+**Master on/off switch (`enabled`).** A toggle switch in the toolbar (`.nc-switch`,
+`data-act="toggle"`) gates the whole tool. `enabled` is persisted in
+`localStorage` under `nextcanvas:enabled` (defaults on; only `'0'` is off). When
+off, every interaction handler (`mousemove`/`click`/`dblclick` and the undo/redo
+keydown) early-returns, so the page behaves like a plain dev server, and the
+toolbar collapses — `refreshUI` hides `.nc-modes`, `.nc-actions`, the separator,
+and the hide button, leaving just the brand + switch. `setEnabled(false)` also
+tears down any live editing UI (outline, chip, style/attr panels, selection).
+This is separate from `hidden` (collapse-to-FAB) and `dismissed` (hide the whole
+root for the session).
+
 ### Mixed-children edits (the segmented protocol)
 
 The plugin stamps any host element with ≥1 non-whitespace `JSXText` direct child
