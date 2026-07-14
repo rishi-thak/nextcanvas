@@ -11,8 +11,11 @@
  *     panel (color / background / font-size / weight / align / padding) that
  *     rewrites the element's inline style={{...}} in source,
  *   - track an undo/redo history of edits (text, attribute, and style),
- *   - a bottom-right toolbar (like Next.js dev tools) with undo/redo, a mode
- *     switch (Autosave vs. Manual), a Save button, and a hide toggle,
+ *   - a bottom-right toolbar (like Next.js dev tools) with an on/off switch,
+ *     undo/redo, a mode switch (Autosave vs. Manual), a Save button, and a hide
+ *     toggle. Flipping the switch off makes the dev server behave like a plain
+ *     dev server (no outlining/editing/panels) and collapses the toolbar to just
+ *     the switch,
  *   - write edits back to source via the write-back server.
  *
  * Source mapping uses the `data-loc="<absFile>:<line>:<col>"` attribute stamped
@@ -165,6 +168,10 @@ whenBodyReady(function initNextCanvas(): void {
 
   // ---- state ---------------------------------------------------------------
 
+  // Master on/off switch. When off, nextcanvas is inert: no outlining, editing,
+  // chips, or style panel — the app behaves like a plain dev server — and the
+  // toolbar collapses to just the switch. Persisted; defaults on.
+  let enabled = lsGet('nextcanvas:enabled') !== '0';
   let mode: NextCanvasMode =
     lsGet('nextcanvas:mode') === 'manual' ? 'manual' : 'autosave';
   let hidden = lsGet('nextcanvas:hidden') === '1';
@@ -384,6 +391,20 @@ whenBodyReady(function initNextCanvas(): void {
       padding: 7px 8px 7px 12px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
     }
     .nc-brand { font-weight: 600; letter-spacing: -0.01em; color: #a78bfa; white-space: nowrap; }
+    .nc-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; flex: none; }
+    .nc-switch input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+    .nc-track {
+      width: 34px; height: 18px; border-radius: 999px; position: relative;
+      background: rgba(255,255,255,0.18); transition: background .15s ease;
+    }
+    .nc-track::after {
+      content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+      border-radius: 50%; background: #fff; transition: transform .15s ease;
+      box-shadow: 0 1px 2px rgba(0,0,0,.4);
+    }
+    .nc-switch.nc-on .nc-track { background: #6d28d9; }
+    .nc-switch.nc-on .nc-track::after { transform: translateX(16px); }
+    .nc-sep { width: 1px; align-self: stretch; background: rgba(255,255,255,0.12); margin: 0 2px; }
     .nc-modes { display: flex; background: rgba(255,255,255,0.06); border-radius: 8px; padding: 2px; }
     .nc-mode {
       border: 0; background: transparent; color: #a2a2b4; font: inherit;
@@ -398,23 +419,23 @@ whenBodyReady(function initNextCanvas(): void {
     }
     .nc-btn:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
     .nc-btn:disabled { opacity: .35; cursor: default; }
-    .nc-switch {
+    .nc-btnsw {
       display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
       font-size: 12px; font-weight: 600; color: #a2a2b4; white-space: nowrap;
       user-select: none; padding: 0 4px;
     }
-    .nc-switch.nc-on { color: #f5f5f7; }
-    .nc-switch-track {
+    .nc-btnsw.nc-on { color: #f5f5f7; }
+    .nc-btnsw-track {
       position: relative; width: 34px; height: 18px; border-radius: 999px;
       background: rgba(255,255,255,0.18); transition: background .15s ease;
     }
-    .nc-switch-knob {
+    .nc-btnsw-knob {
       position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
       border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4);
       transition: transform .15s ease;
     }
-    .nc-switch.nc-on .nc-switch-track { background: #6d28d9; }
-    .nc-switch.nc-on .nc-switch-knob { transform: translateX(16px); }
+    .nc-btnsw.nc-on .nc-btnsw-track { background: #6d28d9; }
+    .nc-btnsw.nc-on .nc-btnsw-knob { transform: translateX(16px); }
     .nc-save {
       display: inline-flex; align-items: center; gap: 6px; border: 0;
       background: #6d28d9; color: #fff; font: inherit; font-weight: 600;
@@ -606,14 +627,19 @@ whenBodyReady(function initNextCanvas(): void {
   ui.innerHTML = `
     <div class="nc-bar">
       <span class="nc-brand">◆ nextcanvas</span>
+      <label class="nc-switch" title="Turn nextcanvas editing on/off">
+        <input type="checkbox" data-act="toggle" />
+        <span class="nc-track"></span>
+      </label>
+      <span class="nc-sep"></span>
       <div class="nc-modes">
         <button class="nc-mode" data-mode="autosave" title="Edits write to source immediately">Autosave</button>
         <button class="nc-mode" data-mode="manual" title="Stage edits, then click Save">Manual</button>
       </div>
       <div class="nc-actions">
-        <span class="nc-switch" data-act="buttons">
-          <span class="nc-switch-text">Buttons</span>
-          <span class="nc-switch-track"><span class="nc-switch-knob"></span></span>
+        <span class="nc-btnsw" data-act="buttons">
+          <span class="nc-btnsw-text">Buttons</span>
+          <span class="nc-btnsw-track"><span class="nc-btnsw-knob"></span></span>
         </span>
         <button class="nc-btn" data-act="undo" title="Undo (Ctrl/Cmd+Z)">↶</button>
         <button class="nc-btn" data-act="redo" title="Redo (Ctrl/Cmd+Shift+Z)">↷</button>
@@ -630,6 +656,12 @@ whenBodyReady(function initNextCanvas(): void {
   const barEl = q('.nc-bar');
   const fabEl = q('.nc-fab');
   const buttonsBtn = q('[data-act="buttons"]');
+  const switchEl = q('.nc-switch');
+  const toggleInput = q<HTMLInputElement>('[data-act="toggle"]');
+  const sepEl = q('.nc-sep');
+  const modesEl = q('.nc-modes');
+  const actionsEl = q('.nc-actions');
+  const hideBtn = q<HTMLButtonElement>('[data-act="hide"]');
   const undoBtn = q<HTMLButtonElement>('[data-act="undo"]');
   const redoBtn = q<HTMLButtonElement>('[data-act="redo"]');
   const saveBtn = q<HTMLButtonElement>('[data-act="save"]');
@@ -657,6 +689,16 @@ whenBodyReady(function initNextCanvas(): void {
     ui.style.display = dismissed ? 'none' : '';
     barEl.style.display = hidden ? 'none' : 'flex';
     fabEl.style.display = hidden ? 'grid' : 'none';
+
+    // The switch always shows; the editing controls only when enabled. When off
+    // the toolbar collapses to just the brand + switch (a plain dev server).
+    toggleInput.checked = enabled;
+    switchEl.classList.toggle('nc-on', enabled);
+    sepEl.style.display = enabled ? 'block' : 'none';
+    modesEl.style.display = enabled ? 'flex' : 'none';
+    actionsEl.style.display = enabled ? 'flex' : 'none';
+    hideBtn.style.display = enabled ? 'grid' : 'none';
+
     undoBtn.disabled = undoStack.length === 0;
     redoBtn.disabled = redoStack.length === 0;
     const count = stagedDirtyCount();
@@ -956,6 +998,20 @@ whenBodyReady(function initNextCanvas(): void {
     refreshUI();
   }
 
+  function setEnabled(on: boolean): void {
+    enabled = on;
+    lsSet('nextcanvas:enabled', on ? '1' : '0');
+    // Turning off must leave no active editing UI behind so the page behaves
+    // like a plain dev server.
+    if (!on) {
+      hideOutline();
+      hideChip();
+      if (panelOpen) closePanel();
+      deselect();
+    }
+    refreshUI();
+  }
+
   function setHidden(h: boolean): void {
     hidden = h;
     lsSet('nextcanvas:hidden', h ? '1' : '0');
@@ -981,6 +1037,13 @@ whenBodyReady(function initNextCanvas(): void {
     }
     refreshUI();
   }
+
+  ui.addEventListener('change', (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-act="toggle"]')) {
+      setEnabled((t as HTMLInputElement).checked);
+    }
+  });
 
   ui.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
@@ -1391,6 +1454,7 @@ whenBodyReady(function initNextCanvas(): void {
   document.addEventListener(
     'mousemove',
     (e) => {
+      if (!enabled) return;
       const el = e.target;
       if (inUI(el)) {
         // Hovering our own UI (e.g. the chip): keep the chip anchored so it's
@@ -1433,6 +1497,7 @@ whenBodyReady(function initNextCanvas(): void {
   document.addEventListener(
     'click',
     (e) => {
+      if (!enabled) return;
       const el = e.target;
       if (inUI(el)) return;
       if (el instanceof HTMLElement && el.isContentEditable) return;
@@ -1448,6 +1513,7 @@ whenBodyReady(function initNextCanvas(): void {
   document.addEventListener(
     'dblclick',
     (e) => {
+      if (!enabled) return;
       const el = e.target;
       if (inUI(el)) return;
       if (!isEditableEl(el)) return;
@@ -1523,6 +1589,7 @@ whenBodyReady(function initNextCanvas(): void {
   document.addEventListener(
     'keydown',
     (e) => {
+      if (!enabled) return;
       const active = document.activeElement;
       if (active instanceof HTMLElement && active.isContentEditable) return;
       if (e.key === 'Escape' && selected && !inUI(active)) {

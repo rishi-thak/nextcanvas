@@ -59,10 +59,8 @@ export default function Home() {
           </span>
           <h1 className="hero-title">Edit your Next.js app right in the browser.</h1>
           <p className="hero-sub">
-            nextcanvas turns your locally-running app into an editable canvas.
-            Double-click any static text, type a new value, and it is written
-            straight back into your source file. Fast Refresh does the rest.
-          </p>
+            nextcanvas turns your locally-running app into an editable canvas. double-click any static text, type a new value, and it is written straight back into your source file. fast refresh does the rest.
+                                                      </p>
           <div className="hero-cta">
             <a className="btn btn-primary btn-lg" href="#install">
               Get started

@@ -226,6 +226,12 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   single-click does **not** select. Persisted as `nextcanvas:buttons` (`on`/`off`)
   in localStorage; toggling ON also drops any current style selection. Hover
   outlines, the attr chip, and double-click editing stay available in both modes.
+  This is a **different** control from the master on/off switch (`enabled`,
+  `.nc-switch`, `data-act="toggle"`, below): the master switch turns the *whole
+  tool* off, the Buttons toggle only gates the *page's* interactivity while
+  editing stays on. To avoid colliding with the master switch's `.nc-switch`
+  styles, the Buttons control is its own toggle-switch markup namespaced
+  `.nc-btnsw-*` (`data-act="buttons"`, state `buttonsEnabled`, `setButtons`).
 - **Editable attributes come in two flavors, stamped separately.** The plugin
   emits `data-nc-attrs` for string-literal attrs (`href="/x"`) and `data-nc-bound`
   for bound *simple-identifier* attrs (`href={GITHUB}`). Both raise the attr chip;
@@ -357,6 +363,17 @@ helpers (`writeForward`/`writeReverse`, `applyChangeDom`, `keyFor`,
 **The attribute panel is namespaced `nc-attr-*` / `attrPanel`** to avoid
 colliding with the style panel's `nc-*` / `panel` (both features independently
 added a `.nc-panel` + `const panel`; keep them distinct).
+
+**Master on/off switch (`enabled`).** A toggle switch in the toolbar (`.nc-switch`,
+`data-act="toggle"`) gates the whole tool. `enabled` is persisted in
+`localStorage` under `nextcanvas:enabled` (defaults on; only `'0'` is off). When
+off, every interaction handler (`mousemove`/`click`/`dblclick` and the undo/redo
+keydown) early-returns, so the page behaves like a plain dev server, and the
+toolbar collapses — `refreshUI` hides `.nc-modes`, `.nc-actions`, the separator,
+and the hide button, leaving just the brand + switch. `setEnabled(false)` also
+tears down any live editing UI (outline, chip, style/attr panels, selection).
+This is separate from `hidden` (collapse-to-FAB) and `dismissed` (hide the whole
+root for the session).
 
 ### Mixed-children edits (the segmented protocol)
 
