@@ -1,0 +1,27 @@
+[package]
+name = "nextcanvas_swc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "SWC plugin that stamps data-loc onto host JSX elements for nextcanvas."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned to the swc_core that Next 16.2.x embeds. Wasm plugins are backward-
+# compatible from @swc/core 1.15.0 (swc_core >= 47), so a plugin built against
+# this runs on 16.2.x and newer runtimes. Bump only if a newer Next runtime
+# rejects the ABI.
+swc_core = { version = "58.0.4", features = [
+  "ecma_plugin_transform",
+  "ecma_ast",
+  "ecma_visit",
+  "common",
+] }
+
+[profile.release]
+# NOTE: cross-crate LTO drops the Wasm import attributes on swc_plugin_proxy's
+# host externs (__lookup_char_pos_source_map_proxy, __get_transform_context),
+# breaking the link. Keep LTO off. opt-level "s" keeps the artifact small.
+opt-level = "s"
