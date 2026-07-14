@@ -372,8 +372,8 @@ keydown) early-returns, so the page behaves like a plain dev server, and the
 toolbar collapses — `refreshUI` hides `.nc-modes`, `.nc-actions`, the separator,
 and the hide button, leaving just the brand + switch. `setEnabled(false)` also
 tears down any live editing UI (outline, chip, style/attr panels, selection).
-This is separate from `hidden` (collapse-to-FAB) and `dismissed` (hide the whole
-root for the session).
+This is separate from `hidden` (collapse-to-FAB) and `dismissed` (✕ hides the
+whole root until reload; also forces Buttons on so the page is interactive).
 
 ### Mixed-children edits (the segmented protocol)
 

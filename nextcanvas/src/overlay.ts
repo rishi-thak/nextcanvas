@@ -149,23 +149,6 @@ whenBodyReady(function initNextCanvas(): void {
     }
   }
 
-  // sessionStorage — scoped to the tab/session: survives reloads, resets when
-  // the session ends. Used for the "hide for this session" dismissal.
-  function ssGet(key: string): string | null {
-    try {
-      return window.sessionStorage.getItem(key);
-    } catch {
-      return null;
-    }
-  }
-  function ssSet(key: string, val: string): void {
-    try {
-      window.sessionStorage.setItem(key, val);
-    } catch {
-      /* ignore */
-    }
-  }
-
   // ---- state ---------------------------------------------------------------
 
   // Master on/off switch. When off, nextcanvas is inert: no outlining, editing,
@@ -175,8 +158,9 @@ whenBodyReady(function initNextCanvas(): void {
   let mode: NextCanvasMode =
     lsGet('nextcanvas:mode') === 'manual' ? 'manual' : 'autosave';
   let hidden = lsGet('nextcanvas:hidden') === '1';
-  // Fully dismissed for this session — hides the whole UI, logo included.
-  let dismissed = ssGet('nextcanvas:dismissed') === '1';
+  // Fully dismissed — hides the whole UI, logo included. Transient (not
+  // persisted), so a reload brings the toolbar back.
+  let dismissed = false;
   // "Buttons" toggle. OFF (default) = edit mode: the page is inert so clicks
   // don't navigate/scroll/fire handlers, letting you select and edit freely.
   // ON = live mode: the app behaves normally. Persisted across sessions.
@@ -646,7 +630,7 @@ whenBodyReady(function initNextCanvas(): void {
         <button class="nc-save" data-act="save" title="Write staged changes to source">Save <span class="nc-badge">0</span></button>
       </div>
       <button class="nc-btn nc-hide" data-act="hide" title="Collapse to logo">–</button>
-      <button class="nc-btn nc-dismiss" data-act="dismiss" title="Hide for this session (returns on a new session)">✕</button>
+      <button class="nc-btn nc-dismiss" data-act="dismiss" title="Hide toolbar (returns on reload; turns Buttons on)">✕</button>
     </div>
     <button class="nc-fab" data-act="show" title="Show nextcanvas toolbar">◆</button>
   `;
@@ -1028,14 +1012,10 @@ whenBodyReady(function initNextCanvas(): void {
 
   function setDismissed(d: boolean): void {
     dismissed = d;
-    ssSet('nextcanvas:dismissed', d ? '1' : '0');
-    if (d) {
-      // eslint-disable-next-line no-console
-      console.info(
-        "[nextcanvas] toolbar hidden for this session — run sessionStorage.removeItem('nextcanvas:dismissed') and reload to bring it back"
-      );
-    }
-    refreshUI();
+    // Dismissing hands the page back to the app: turn Buttons on (live mode)
+    // so clicks navigate/fire handlers. Not persisted — reload shows the bar again.
+    if (d) setButtons(true);
+    else refreshUI();
   }
 
   ui.addEventListener('change', (e) => {
