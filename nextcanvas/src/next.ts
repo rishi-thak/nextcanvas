@@ -17,7 +17,6 @@
  * is a pure no-op: your config passes through untouched.
  */
 
-import path from 'path';
 import { startServer, PORT } from './server';
 
 type SwcPlugin = [string, Record<string, unknown>];
@@ -32,11 +31,26 @@ type NextConfig = Record<string, unknown> & {
   experimental?: { swcPlugins?: SwcPlugin[] } & Record<string, unknown>;
 };
 
-/** Absolute path to the prebuilt SWC plugin shipped with the package. */
-function pluginWasmPath(): string {
-  // At runtime __dirname is <pkg>/dist; the wasm ships at <pkg>/swc.
-  // Forward slashes: Turbopack mishandles backslashes in swcPlugins paths.
-  return path.resolve(__dirname, '..', 'swc', 'nextcanvas_swc.wasm').replace(/\\/g, '/');
+/**
+ * The prebuilt SWC plugin, expressed as a resolvable **package specifier** —
+ * NOT an absolute filesystem path.
+ *
+ * Turbopack cannot load a `.wasm` swcPlugin given as an absolute path (it 500s
+ * with "Module not found", even though the file exists); it must be a specifier
+ * it can resolve through the project's node_modules. webpack/next-swc accepts
+ * the specifier too, so one form works under both bundlers.
+ *
+ * This depends on the package `exports` map exposing `./swc/*` — without it the
+ * specifier fails to resolve with ERR_PACKAGE_PATH_NOT_EXPORTED.
+ *
+ * The package name is read from our own package.json (a relative require, so it
+ * bypasses `exports` encapsulation) rather than hard-coded, so a rename/rescope
+ * of the package keeps the specifier correct.
+ */
+function pluginSpecifier(): string {
+  // At runtime __dirname is <pkg>/dist; package.json is one level up.
+  const { name } = require('../package.json') as { name: string };
+  return `${name}/swc/nextcanvas_swc.wasm`;
 }
 
 export function withCanvas(nextConfig: NextConfig = {}): NextConfig {
@@ -54,7 +68,7 @@ export function withCanvas(nextConfig: NextConfig = {}): NextConfig {
     experimental: {
       ...(nextConfig.experimental || {}),
       // Append so we don't clobber the user's own SWC plugins.
-      swcPlugins: [...existingPlugins, [pluginWasmPath(), {}]],
+      swcPlugins: [...existingPlugins, [pluginSpecifier(), {}]],
     },
     // Single source of truth for the port: server.ts derives PORT from
     // NEXTCANVAS_PORT; we inline that same value into the client so the

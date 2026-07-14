@@ -1,0 +1,44 @@
+# Publishes the @rishi-thak/nextcanvas package to npm when a GitHub Release is published.
+# See: https://docs.github.com/en/actions/publishing-packages/publishing-nodejs-packages
+#
+# Notes specific to this repo:
+# - The package lives in nextcanvas/, not the repo root, so every step runs there
+#   (defaults.run.working-directory).
+# - There is no test suite, so the "build" job just runs `npm ci`, which triggers the
+#   package's `prepare` script (tsc build of dist/). That verifies the package compiles.
+# - The prebuilt SWC wasm (swc/nextcanvas_swc.wasm) is checked in, so CI needs no Rust.
+# - `access: public` comes from package.json publishConfig, so `npm publish` needs no flag.
+
+name: Node.js Package
+
+on:
+  release:
+    types: [published]
+
+defaults:
+  run:
+    working-directory: nextcanvas
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+      - run: npm ci
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

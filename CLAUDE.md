@@ -65,6 +65,29 @@ dependencies, and npm does **not** run the package's `prepare` build for a
 `npm install` inside `nextcanvas/` (not just `demo/`) — that installs deps
 (`ts-morph`, the TS toolchain) and builds `dist/`.
 
+### Releasing (publish to npm)
+
+Publishing is automated by `.github/workflows/npm-publish.yml`, which fires on
+`release: [published]` — i.e. **only when a GitHub Release is published**, not on
+ordinary pushes. The workflow runs `npm ci` + `npm publish` inside `nextcanvas/`
+(`access: public` comes from `package.json` `publishConfig`; `prepublishOnly`
+rebuilds `dist/`; the wasm is checked in, so CI needs no Rust). Auth uses the
+`NPM_TOKEN` repo secret (Settings → Secrets and variables → Actions).
+
+To cut a release (run from the repo root; **only when explicitly asked** — see the
+version-control rules at the top of this file):
+
+1. Bump the version in `nextcanvas/package.json` (npm rejects a duplicate version):
+   `cd nextcanvas && npm version patch --no-git-tag-version` (or `minor`/`major`).
+2. Commit the bump and push to `main`.
+3. Create + publish the GitHub Release, which triggers the publish workflow:
+   `gh release create v0.0.5 --title v0.0.5 --generate-notes`
+   (tag must match the new version; `gh release create` publishes immediately —
+   add `--draft` to stage it and publish later from the Releases page).
+
+Verify the run under the repo's **Actions** tab, then confirm on npm:
+`npm view @rishi-thak/nextcanvas version`.
+
 ### Testing (browser round-trip)
 
 There is no unit-test suite. Verification is done by driving a real browser with
@@ -138,13 +161,29 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   module attribute; current `wasm-ld` treats them as hard-undefined and fails the
   link unless told to emit them as imports. Also keep **LTO off** — cross-crate
   LTO drops those import attributes.
-- **Turbopack + wasm swcPlugins path:** pass the wasm path with **forward
-  slashes** (`withCanvas` normalizes it). Backslashes make Turbopack crash the
-  app with a module-resolution error (upstream bug vercel/next.js#78156).
-- **Turbopack on Windows silently does NOT run the wasm plugin** (upstream:
-  "windows imports are not implemented yet", vercel/next.js#84972). The app
-  renders but nothing is stamped → the overlay reports "no source info". Use
-  **webpack** on Windows (`next dev --webpack`). Turbopack works on macOS/Linux.
+- **The wasm swcPlugin MUST be a package specifier, not an absolute path.**
+  `withCanvas` passes `"@rishi-thak/nextcanvas/swc/nextcanvas_swc.wasm"` (a
+  resolvable specifier) to `experimental.swcPlugins` — NOT `path.resolve(...)`.
+  **Turbopack cannot load a `.wasm` swcPlugin given as an absolute filesystem
+  path**: it 500s with `Module not found: Can't resolve '…/nextcanvas_swc.wasm'`
+  even though the file exists, and stamps nothing. webpack/next-swc accepts the
+  specifier too, so one form works under both bundlers (verified end-to-end,
+  macOS, Next 16.2.10). This is why the package `exports` map **must** expose
+  `"./swc/*": "./swc/*"` — without it the specifier fails to resolve with
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`. (History: `withCanvas` used to pass the
+  absolute path with forward slashes to dodge an old Turbopack backslash crash,
+  vercel/next.js#78156; the specifier form supersedes that entirely.)
+- **Turbopack stamps are project-RELATIVE; webpack stamps are ABSOLUTE.** Same
+  plugin, different bundler path handling: Turbopack emits `data-loc="app/page.tsx:L:C"`,
+  webpack emits `data-loc="/abs/app/page.tsx:L:C"`. Both round-trip correctly
+  because the write-back server resolves the relative path against its cwd (the
+  project root under `next dev`) via ts-morph `addSourceFileAtPath`.
+- **Turbopack on Windows is still unverified / likely blocked.** Separate from
+  the absolute-path issue above, there's an upstream gap "windows imports are
+  not implemented yet" (vercel/next.js#84972) about wasm host-function imports
+  at *execution* time — the specifier fix does not address that. On Windows,
+  prefer **webpack** (`next dev --webpack`) until Turbopack-on-Windows is
+  verified. Turbopack on macOS/Linux works with the fix (macOS verified).
 - **Overlay must not be bundled.** It is served raw from the server and injected
   as a classic `<script>`; bundling would couple it to the app's toolchain.
 - **The overlay defers init to `DOMContentLoaded`** — Next injects `main-app.js`
@@ -171,47 +210,53 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
 
 The stamp is an SWC plugin, so it's no longer webpack-only. Verified status:
 
-| Bundler   | Windows                     | macOS / Linux            |
-|-----------|-----------------------------|--------------------------|
-| webpack   | ✅ works (verified)          | ✅ expected               |
-| Turbopack | ❌ silent no-op (upstream)   | ✅ expected (unverified)  |
+| Bundler   | Windows                     | macOS / Linux                 |
+|-----------|-----------------------------|-------------------------------|
+| webpack   | ✅ works (verified)          | ✅ works (verified, macOS)     |
+| Turbopack | ❓ unverified (see #84972)   | ✅ works (verified, macOS)     |
 
-Only webpack-on-Windows is verified in this repo (the dev machine is Windows).
-Turbopack-on-Windows is blocked upstream; the rest are expected to work because
-only the bundler/OS differs — same wasm, same config.
+macOS webpack **and** Turbopack are now verified end-to-end (full edit
+round-trip) after the specifier fix — see the swcPlugin-specifier constraint
+above. webpack-on-Windows was verified previously (the original dev machine is
+Windows). Turbopack-on-Windows remains unverified and may still be blocked by
+the separate wasm-imports gap (vercel/next.js#84972), independent of the
+specifier fix. Linux is expected to match macOS (same wasm, same config).
 
-## TODO — pick up here (Turbopack support)
+## Turbopack support — RESOLVED on macOS (was the standing TODO)
 
-**Problem:** nextcanvas does **not work under Turbopack** (`next dev --turbo`, and
-`next dev` defaults to Turbopack in Next 16). Editing/overlay effectively don't
-function. Everything works under **webpack** (`next dev --webpack`), which is why
-`demo`'s `dev` script forces `--webpack`.
+**Root cause (found on macOS, Next 16.2.10):** `withCanvas` passed the wasm to
+`experimental.swcPlugins` as an **absolute filesystem path**. Turbopack cannot
+load a `.wasm` swcPlugin by absolute path — it 500s with `Module not found`
+(*not* the silent no-op previously assumed), so the app didn't even render and
+nothing was stamped. webpack/next-swc loaded the same absolute path fine, which
+is why only webpack worked.
 
-**What's known:**
-- The `data-loc` SWC plugin (`swc/nextcanvas_swc.wasm`, injected via
-  `experimental.swcPlugins`) is not executed by Turbopack on Windows — upstream
-  gap: "windows imports are not implemented yet"
-  (vercel/next.js#84972, #78156). No stamps ⇒ no source resolution ⇒ no editing.
-- `withCanvas` already normalizes the wasm path to forward slashes so Turbopack
-  at least doesn't hard-crash the app (it 200s, but the plugin silently no-ops).
+**Fix (shipped in this repo):**
+1. `src/next.ts` → `pluginSpecifier()` passes the **package specifier**
+   `"@rishi-thak/nextcanvas/swc/nextcanvas_swc.wasm"` (derived from the package
+   name in `package.json`) instead of `path.resolve(...)`.
+2. `package.json` `exports` gained `"./swc/*": "./swc/*"` so that specifier
+   resolves (else `ERR_PACKAGE_PATH_NOT_EXPORTED`).
 
-**To investigate / do next:**
-1. Reproduce on a non-Windows machine: does the wasm swcPlugin run under
-   Turbopack on macOS/Linux? If yes, the failure is Windows-specific only.
-2. Determine whether the **overlay/toolbar** loads under Turbopack independent of
-   stamping (it's served from `:3131/overlay.js` and injected by
-   `<NextCanvasOverlay/>`, so it *should* appear even with no stamps — confirm
-   with `curl :3131/overlay.js | grep -c nc-root` and a browser).
-3. Options if Turbopack wasm stays broken: (a) wait on upstream; (b) detect
-   Turbopack and print a clear "use --webpack" warning from `withCanvas`;
-   (c) explore a Turbopack-compatible source stamp (e.g. a Next-supported
-   transform, or reading the dev JSX runtime's `__source` if/when available).
-4. Update the bundler/OS matrix above once verified on other machines.
+One unified config now works under **both** bundlers — no bundler detection.
+Verified end-to-end on macOS (overlay loads, `data-loc` stamped, double-click →
+edit → Enter → source file rewritten on disk) under webpack **and** Turbopack,
+using the stock demo `next.config.js`.
 
-**Reminder for the other machine:** `dist/` and `swc-plugin/target/` are
-gitignored. After pulling, run `npm install` (or `npm run build`) inside
-`nextcanvas/` to rebuild `dist/` before the demo will pick up source changes,
-then fully restart `next dev` (`rm -rf demo/.next`, kill any stray :3131 server).
+**Still open:**
+- **Turbopack-on-Windows** is unverified and may still fail for a *different*
+  upstream reason (wasm host-imports gap, vercel/next.js#84972). Keep `--webpack`
+  on Windows until verified.
+- **The demo still forces `--webpack`** (`demo/package.json` `dev` script) and
+  currently installs the **published** `@rishi-thak/nextcanvas` (not `file:`),
+  which predates this fix. To exercise Turbopack against the fixed package,
+  point the demo at `file:../nextcanvas` (rebuild `dist/` first) or publish a new
+  version, then flip `dev` to `next dev` / `--turbo`.
+
+**Rebuild reminder:** `dist/` and `swc-plugin/target/` are gitignored. After
+pulling, run `npm install` (or `npm run build`) inside `nextcanvas/` to rebuild
+`dist/` before a `file:` consumer picks up source changes, then fully restart
+`next dev` (`rm -rf <app>/.next`, kill any stray :3131 server).
 
 ## Current scope
 
