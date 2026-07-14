@@ -31,6 +31,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"test/**/*.test.js\"",
     "build:wasm": "cargo build --release --manifest-path swc-plugin/Cargo.toml --target wasm32-wasip1 && node scripts/copy-wasm.mjs",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepare": "npm run build",
