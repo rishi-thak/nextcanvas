@@ -1,16 +1,22 @@
 //! nextcanvas SWC plugin — the SWC-native source-location stamp.
 //!
 //! Stamps `data-loc="<absFile>:<line>:<col>"` onto host (lowercase) JSX elements
-//! that carry **at least one static text run the write-back server can edit** —
-//! i.e. an element with one or more non-whitespace `JSXText` direct children.
-//! This covers both plain static text (`<h1>Hello</h1>`) and text mixed with
-//! inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
-//! surrounding text runs are editable and the inline elements are preserved.
+//! the write-back server can edit — i.e. an element that has EITHER:
+//!   - one or more non-whitespace `JSXText` direct children (editable text),
+//!     whether plain (`<h1>Hello</h1>`) or mixed with inline child elements
+//!     (`<p>Hello <strong>world</strong>!</p>`, where the surrounding text runs
+//!     are editable and the inline elements are preserved), OR
+//!   - at least one editable string-literal attribute (`<img src="/a.png"/>`,
+//!     `<a href="/x">…</a>`; editable attribute value).
 //!
 //! An element with a **direct `{expression}` child** (a bound value) is left
-//! unstamped: its text-node layout is ambiguous, so the overlay won't outline or
-//! offer to edit something whose commit would just bounce. (Expressions nested
-//! *inside* a child element are fine — the child is preserved verbatim.)
+//! unstamped for text purposes: its text-node layout is ambiguous, so the
+//! overlay won't offer to edit something whose commit would just bounce.
+//! (Expressions nested *inside* a child element are fine — the child is
+//! preserved verbatim.) Such an element is still stamped if it has an editable
+//! string-literal attribute. The editable attributes are emitted to the browser
+//! as `data-nc-attrs` so the overlay never mistakes a bound `href={x}` (a
+//! resolved URL in the DOM) for an editable literal.
 //!
 //! Because it runs inside SWC, it works under **both** the webpack (next-swc)
 //! and Turbopack pipelines — unlike a Babel plugin, which opts Next out of SWC.
@@ -56,6 +62,39 @@ fn has_editable_text(children: &[JSXElementChild]) -> bool {
     has_text
 }
 
+/// Attributes the write-back server can rewrite (each must be a plain string
+/// literal in source, e.g. `src="/a.png"`). Kept in sync with EDITABLE_ATTRS in
+/// `src/overlay.ts`. `aria-label` is a single hyphenated JSX identifier.
+const EDITABLE_ATTRS: [&str; 6] = ["src", "href", "alt", "title", "placeholder", "aria-label"];
+
+/// The whitelisted attributes on this element whose value is a **string literal**
+/// (`src="…"`) — NOT a `{expression}`, which the server can't rewrite. This is
+/// what makes `<img>`/`<a>` (no static-text child) editable, and — crucially —
+/// it's emitted to the browser as `data-nc-attrs` so the overlay edits only
+/// these and never mistakes a bound `href={x}` (a resolved URL in the DOM, which
+/// looks identical to a literal) for an editable one.
+fn editable_string_attrs(attrs: &[JSXAttrOrSpread]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter_map(|a| match a {
+            JSXAttrOrSpread::JSXAttr(attr) => {
+                let name = match &attr.name {
+                    JSXAttrName::Ident(id) => &*id.sym,
+                    JSXAttrName::JSXNamespacedName(_) => return None,
+                };
+                if EDITABLE_ATTRS.contains(&name)
+                    && matches!(attr.value, Some(JSXAttrValue::Str(_)))
+                {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            }
+            JSXAttrOrSpread::SpreadElement(_) => None,
+        })
+        .collect()
+}
+
 fn already_stamped(attrs: &[JSXAttrOrSpread]) -> bool {
     attrs.iter().any(|a| match a {
         JSXAttrOrSpread::JSXAttr(attr) => match &attr.name {
@@ -81,8 +120,10 @@ impl VisitMut for DataLocStamper {
             _ => return,
         }
 
-        // Only stamp what the overlay can actually edit (see has_editable_text).
-        if !has_editable_text(&node.children) {
+        // Only stamp what the overlay can actually edit: an editable text run
+        // (see has_editable_text) OR ≥1 editable string-literal attribute.
+        let attr_names = editable_string_attrs(&node.opening.attrs);
+        if !has_editable_text(&node.children) && attr_names.is_empty() {
             return;
         }
         if already_stamped(&node.opening.attrs) {
@@ -103,6 +144,21 @@ impl VisitMut for DataLocStamper {
                 raw: None,
             })),
         }));
+
+        // Tell the overlay exactly which attributes are safe to edit (string
+        // literals in source). Without this it can't tell a literal `href="/x"`
+        // from a bound `href={x}` — both are just a resolved value in the DOM.
+        if !attr_names.is_empty() {
+            node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                span: DUMMY_SP,
+                name: JSXAttrName::Ident(IdentName::new("data-nc-attrs".into(), DUMMY_SP)),
+                value: Some(JSXAttrValue::Str(Str {
+                    span: DUMMY_SP,
+                    value: attr_names.join(" ").into(),
+                    raw: None,
+                })),
+            }));
+        }
     }
 }
 

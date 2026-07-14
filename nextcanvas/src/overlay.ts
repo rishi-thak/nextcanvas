@@ -23,16 +23,31 @@ interface NextCanvasSource {
   columnNumber: number;
 }
 
-interface Change {
+// A text edit. `before`/`after` hold one entry per non-whitespace text run of
+// the element (a plain single-text element is just a one-run edit). `mixed`
+// selects the segmented server protocol and the run-aware DOM restore that
+// preserves inline child elements.
+interface TextChange {
+  kind: 'text';
   el: HTMLElement;
   source: NextCanvasSource;
-  // One entry per non-whitespace text run of the element (a single-text element
-  // is just a one-run edit). `mixed` selects the segmented server protocol and
-  // the run-aware DOM restore that preserves inline child elements.
   before: string[];
   after: string[];
   mixed: boolean;
 }
+
+// An attribute edit (src/href/alt/…); before/after are the attribute's string
+// value. Rewritten via the server's attrName path.
+interface AttrChange {
+  kind: 'attr';
+  el: HTMLElement;
+  source: NextCanvasSource;
+  attr: string;
+  before: string;
+  after: string;
+}
+
+type Change = TextChange | AttrChange;
 
 type NextCanvasMode = 'autosave' | 'manual';
 
@@ -97,13 +112,23 @@ whenBodyReady(function initNextCanvas(): void {
 
   const undoStack: Change[] = [];
   const redoStack: Change[] = [];
-  // Manual-mode staging: element -> its original text runs (+ location, mixed).
-  const staged = new Map<
-    HTMLElement,
-    { source: NextCanvasSource; oldRuns: string[]; mixed: boolean }
-  >();
-  // In-flight edit snapshot, captured on dblclick: the original text runs and
-  // the inline child elements (to detect structural changes on commit).
+  // Manual-mode staging, keyed by loc(+attr) so one element can stage its text
+  // AND several attributes independently. `oldRuns` holds the original text runs
+  // (text edits) or a single original value (attr edits, in `oldRuns[0]`).
+  interface StagedEdit {
+    el: HTMLElement;
+    source: NextCanvasSource;
+    kind: 'text' | 'attr';
+    attr?: string;
+    oldRuns: string[];
+    mixed: boolean;
+  }
+  const staged = new Map<string, StagedEdit>();
+  function stageKey(source: NextCanvasSource, attr?: string): string {
+    return `${source.fileName}:${source.lineNumber}:${source.columnNumber}:${attr ?? '#text'}`;
+  }
+  // In-flight text-edit snapshot, captured on dblclick: the original text runs
+  // and the inline child elements (to detect structural changes on commit).
   const editSnapshots = new WeakMap<
     HTMLElement,
     { oldRuns: string[]; elemChildren: Element[]; mixed: boolean; html: string }
@@ -198,6 +223,49 @@ whenBodyReady(function initNextCanvas(): void {
     else el.textContent = snap.oldRuns[0] ?? '';
   }
 
+  // ---- attribute editing ---------------------------------------------------
+
+  // The editable attributes are those the SWC plugin listed in `data-nc-attrs`
+  // (space-separated) — the ones that are string literals in source. We must NOT
+  // infer this from the DOM: a bound `href={x}` and a literal `href="/x"` both
+  // render as a resolved value, so guessing would offer edits that just bounce.
+  function editableAttrs(el: HTMLElement): Array<{ name: string; value: string }> {
+    const raw = el.getAttribute('data-nc-attrs');
+    if (!raw) return [];
+    const out: Array<{ name: string; value: string }> = [];
+    for (const name of raw.split(/\s+/)) {
+      if (!name) continue;
+      // getAttribute returns the raw source value (e.g. "/a.png"), not the
+      // resolved property (img.src would be an absolute URL) — what we must edit.
+      out.push({ name, value: el.getAttribute(name) ?? '' });
+    }
+    return out;
+  }
+
+  // Nearest ancestor (incl. self) that has editable attrs. We match on
+  // `data-nc-attrs` — not `data-loc` — so a stamped-but-attr-less child (e.g. a
+  // <span> inside <a href="…">) doesn't shadow the link's editable href.
+  function attrHost(el: EventTarget | null): HTMLElement | null {
+    if (!(el instanceof Element)) return null;
+    if (inUI(el)) return null;
+    const node = el.closest('[data-nc-attrs]');
+    return node instanceof HTMLElement ? node : null;
+  }
+
+  // Write a value to the live DOM (used for attr panel visual feedback).
+  function applyValue(el: HTMLElement, attr: string | undefined, value: string): void {
+    if (attr) el.setAttribute(attr, value);
+    else el.textContent = value;
+  }
+
+  function escapeAttr(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
   // ---- styles --------------------------------------------------------------
 
   const style = document.createElement('style');
@@ -258,6 +326,40 @@ whenBodyReady(function initNextCanvas(): void {
       border: 0; box-shadow: 0 8px 30px rgba(0,0,0,.5); cursor: pointer;
       font-size: 16px; display: grid; place-items: center;
     }
+    .nc-chip {
+      position: fixed; z-index: 2147483646; width: 22px; height: 22px; padding: 0;
+      border-radius: 6px; background: #6d28d9; color: #fff;
+      border: 1px solid rgba(255,255,255,0.25); display: none; place-items: center;
+      cursor: pointer; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    }
+    .nc-chip:hover { background: #7c3aed; }
+    .nc-panel {
+      position: fixed; z-index: 2147483647; display: none; width: 280px;
+      background: #0d0d12; color: #f5f5f7; border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 10px; padding: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+      font: 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+    }
+    .nc-panel-title {
+      font-weight: 600; color: #a78bfa; margin-bottom: 8px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nc-panel-close {
+      border: 0; background: transparent; color: #a2a2b4; cursor: pointer;
+      font-size: 14px; padding: 0 2px; line-height: 1;
+    }
+    .nc-row { margin-bottom: 8px; }
+    .nc-row:last-child { margin-bottom: 0; }
+    .nc-row label { display: block; color: #a2a2b4; margin-bottom: 3px; font-size: 11px; }
+    .nc-row input {
+      width: 100%; box-sizing: border-box; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; color: #f5f5f7;
+      padding: 5px 7px; font: inherit; outline: none;
+    }
+    .nc-row input:focus { border-color: #6d28d9; }
+    .nc-thumb {
+      max-width: 100%; max-height: 80px; border-radius: 6px; margin-top: 6px;
+      display: block; background: rgba(255,255,255,0.04);
+    }
   `;
   document.head.appendChild(style);
 
@@ -266,6 +368,25 @@ whenBodyReady(function initNextCanvas(): void {
   outline.style.display = 'none';
   outline.setAttribute('data-nextcanvas-ui', '');
   document.body.appendChild(outline);
+
+  // Hover chip ("✎") shown at the top-right of an element with editable attrs.
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'nc-chip';
+  chip.title = 'Edit attributes';
+  chip.textContent = '✎';
+  chip.setAttribute('data-nextcanvas-ui', '');
+  document.body.appendChild(chip);
+
+  // Popover listing an element's editable attributes as inputs.
+  const panel = document.createElement('div');
+  panel.className = 'nc-panel';
+  panel.setAttribute('data-nextcanvas-ui', '');
+  document.body.appendChild(panel);
+
+  let chipTarget: HTMLElement | null = null;
+  let panelTarget: HTMLElement | null = null;
+  let panelOpen = false;
 
   function drawOutline(el: HTMLElement): void {
     const r = el.getBoundingClientRect();
@@ -320,10 +441,18 @@ whenBodyReady(function initNextCanvas(): void {
   const saveBtn = q<HTMLButtonElement>('[data-act="save"]');
   const badgeEl = q('.nc-badge');
 
+  // A staged edit is dirty when the element's current value differs from its
+  // staged original — attrs compare exactly, text runs compare whitespace-normed.
+  function stagedIsDirty(s: StagedEdit): boolean {
+    return s.attr
+      ? (s.el.getAttribute(s.attr) ?? '') !== s.oldRuns[0]
+      : !runsEqual(readRuns(s.el), s.oldRuns);
+  }
+
   function stagedDirtyCount(): number {
     let n = 0;
-    staged.forEach((info, el) => {
-      if (!runsEqual(readRuns(el), info.oldRuns)) n++;
+    staged.forEach((s) => {
+      if (stagedIsDirty(s)) n++;
     });
     return n;
   }
@@ -362,9 +491,9 @@ whenBodyReady(function initNextCanvas(): void {
     }
   }
 
-  // Write a run-set edit: legacy single-text payload for a plain element, or the
-  // `segments` payload (one entry per text run) for a mixed element.
-  function writeChange(
+  // Write a run-set text edit: legacy single-text payload for a plain element,
+  // or the `segments` payload (one entry per text run) for a mixed element.
+  function writeText(
     source: NextCanvasSource,
     from: string[],
     to: string[],
@@ -382,34 +511,83 @@ whenBodyReady(function initNextCanvas(): void {
     return postEdit({ ...base, segments });
   }
 
+  // Write a string-literal attribute edit (server dispatches on `attrName`).
+  function writeAttr(
+    source: NextCanvasSource,
+    attr: string,
+    oldText: string,
+    newText: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    return postEdit({
+      fileName: source.fileName,
+      lineNumber: source.lineNumber,
+      columnNumber: source.columnNumber,
+      attrName: attr,
+      oldText,
+      newText,
+    });
+  }
+
+  // ---- change helpers (kind-aware) -----------------------------------------
+
+  function changeUnchanged(c: Change): boolean {
+    return c.kind === 'attr'
+      ? c.before === c.after
+      : runsEqual(c.before, c.after);
+  }
+  // Source write in the forward (before→after) or reverse (after→before) sense.
+  function writeForward(c: Change): Promise<{ ok: boolean; error?: string }> {
+    return c.kind === 'attr'
+      ? writeAttr(c.source, c.attr, c.before, c.after)
+      : writeText(c.source, c.before, c.after, c.mixed);
+  }
+  function writeReverse(c: Change): Promise<{ ok: boolean; error?: string }> {
+    return c.kind === 'attr'
+      ? writeAttr(c.source, c.attr, c.after, c.before)
+      : writeText(c.source, c.after, c.before, c.mixed);
+  }
+  // Restore the change's element to one of its ends in the live DOM.
+  function applyChangeDom(c: Change, to: 'before' | 'after'): void {
+    if (c.kind === 'attr') c.el.setAttribute(c.attr, c[to]);
+    else applyDom(c.el, c[to], c.mixed);
+  }
+  function keyFor(c: Change): string {
+    return c.kind === 'attr'
+      ? stageKey(c.source, c.attr)
+      : stageKey(c.source);
+  }
+  function stageChange(c: Change): void {
+    const key = keyFor(c);
+    if (staged.has(key)) return;
+    staged.set(
+      key,
+      c.kind === 'attr'
+        ? { el: c.el, source: c.source, kind: 'attr', attr: c.attr, oldRuns: [c.before], mixed: false }
+        : { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed }
+    );
+  }
+
   // ---- edit lifecycle ------------------------------------------------------
 
-  function commit(
-    el: HTMLElement,
-    source: NextCanvasSource,
-    before: string[],
-    after: string[],
-    mixed: boolean
-  ): void {
-    if (runsEqual(before, after)) return;
-    const change: Change = { el, source, before, after, mixed };
+  function commit(change: Change): void {
+    if (changeUnchanged(change)) return;
     undoStack.push(change);
     redoStack.length = 0;
 
     if (mode === 'autosave') {
-      writeChange(source, before, after, mixed).then((r) => {
+      writeForward(change).then((r) => {
         if (r.ok) {
           toast('Saved — Fast Refresh will update the view');
         } else {
           toast(r.error || 'Edit rejected', true);
-          if (el.isConnected) applyDom(el, before, mixed);
+          if (change.el.isConnected) applyChangeDom(change, 'before');
           const i = undoStack.indexOf(change);
           if (i >= 0) undoStack.splice(i, 1);
           refreshUI();
         }
       });
     } else {
-      if (!staged.has(el)) staged.set(el, { source, oldRuns: before, mixed });
+      stageChange(change);
       toast('Staged — click Save to write to code');
     }
     refreshUI();
@@ -418,16 +596,19 @@ whenBodyReady(function initNextCanvas(): void {
   function undo(): void {
     const change = undoStack.pop();
     if (!change) return;
-    if (change.el.isConnected) applyDom(change.el, change.before, change.mixed);
+    if (change.el.isConnected) applyChangeDom(change, 'before');
     if (mode === 'autosave') {
-      writeChange(change.source, change.after, change.before, change.mixed).then(
-        (r) => {
-          if (!r.ok) toast(r.error || 'Undo failed', true);
-        }
-      );
+      writeReverse(change).then((r) => {
+        if (!r.ok) toast(r.error || 'Undo failed', true);
+      });
     } else {
-      const s = staged.get(change.el);
-      if (s && runsEqual(change.before, s.oldRuns)) staged.delete(change.el);
+      const key = keyFor(change);
+      const s = staged.get(key);
+      const reverted =
+        change.kind === 'attr'
+          ? s != null && change.before === s.oldRuns[0]
+          : s != null && runsEqual(change.before, s.oldRuns);
+      if (reverted) staged.delete(key);
     }
     redoStack.push(change);
     refreshUI();
@@ -436,20 +617,13 @@ whenBodyReady(function initNextCanvas(): void {
   function redo(): void {
     const change = redoStack.pop();
     if (!change) return;
-    if (change.el.isConnected) applyDom(change.el, change.after, change.mixed);
+    if (change.el.isConnected) applyChangeDom(change, 'after');
     if (mode === 'autosave') {
-      writeChange(change.source, change.before, change.after, change.mixed).then(
-        (r) => {
-          if (!r.ok) toast(r.error || 'Redo failed', true);
-        }
-      );
+      writeForward(change).then((r) => {
+        if (!r.ok) toast(r.error || 'Redo failed', true);
+      });
     } else {
-      if (!staged.has(change.el))
-        staged.set(change.el, {
-          source: change.source,
-          oldRuns: change.before,
-          mixed: change.mixed,
-        });
+      stageChange(change);
     }
     undoStack.push(change);
     refreshUI();
@@ -457,25 +631,26 @@ whenBodyReady(function initNextCanvas(): void {
 
   async function save(): Promise<void> {
     if (mode !== 'manual') return;
-    const edits: Array<{
-      source: NextCanvasSource;
-      from: string[];
-      to: string[];
-      mixed: boolean;
-    }> = [];
-    staged.forEach((info, el) => {
-      const cur = readRuns(el);
-      if (!runsEqual(cur, info.oldRuns))
-        edits.push({ source: info.source, from: info.oldRuns, to: cur, mixed: info.mixed });
+    const jobs: Array<() => Promise<{ ok: boolean; error?: string }>> = [];
+    staged.forEach((s) => {
+      if (!stagedIsDirty(s)) return;
+      if (s.attr) {
+        const cur = s.el.getAttribute(s.attr) ?? '';
+        const attr = s.attr;
+        jobs.push(() => writeAttr(s.source, attr, s.oldRuns[0], cur));
+      } else {
+        const cur = readRuns(s.el);
+        jobs.push(() => writeText(s.source, s.oldRuns, cur, s.mixed));
+      }
     });
-    if (edits.length === 0) {
+    if (jobs.length === 0) {
       toast('No changes to save');
       return;
     }
     let ok = 0;
     let failed = 0;
-    for (const e of edits) {
-      const r = await writeChange(e.source, e.from, e.to, e.mixed);
+    for (const job of jobs) {
+      const r = await job();
       if (r.ok) ok++;
       else {
         failed++;
@@ -537,6 +712,156 @@ whenBodyReady(function initNextCanvas(): void {
 
   refreshUI();
 
+  // ---- attribute chip + panel ----------------------------------------------
+
+  function showChip(host: HTMLElement): void {
+    chipTarget = host;
+    const r = host.getBoundingClientRect();
+    chip.style.display = 'grid';
+    chip.style.left = Math.max(2, Math.min(window.innerWidth - 24, r.right - 24)) + 'px';
+    chip.style.top = Math.max(2, r.top + 2) + 'px';
+  }
+  function hideChip(): void {
+    chip.style.display = 'none';
+    chipTarget = null;
+  }
+
+  function positionPanel(host: HTMLElement): void {
+    const r = host.getBoundingClientRect();
+    const pw = 280;
+    let left = r.left;
+    if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+    panel.style.left = Math.max(8, left) + 'px';
+    // Below the element, or above it if there isn't room below.
+    const belowTop = r.bottom + 8;
+    panel.style.top =
+      belowTop + 160 > window.innerHeight && r.top > 160
+        ? Math.max(8, r.top - 8 - panel.offsetHeight) + 'px'
+        : belowTop + 'px';
+  }
+
+  function openPanel(host: HTMLElement): void {
+    const source = getSource(host);
+    if (!source) {
+      toast('No source info for this element (is it dev mode?)', true);
+      return;
+    }
+    panelTarget = host;
+    panelOpen = true;
+
+    const rows = editableAttrs(host)
+      .map((a) => {
+        const thumb =
+          a.name === 'src'
+            ? `<img class="nc-thumb" alt="" src="${escapeAttr(a.value)}" />`
+            : '';
+        return `<div class="nc-row">
+            <label>${a.name}</label>
+            <input data-attr="${a.name}" value="${escapeAttr(a.value)}" spellcheck="false" autocomplete="off" />
+            ${thumb}
+          </div>`;
+      })
+      .join('');
+    panel.innerHTML = `<div class="nc-panel-title">Edit attributes<button type="button" class="nc-panel-close" data-act="close" title="Close">✕</button></div>${rows}`;
+
+    // Stash each input's original value so we only commit real changes, and hide
+    // any thumbnail that fails to load (avoids a broken-image icon).
+    panel.querySelectorAll('input').forEach((inp) => {
+      (inp as HTMLInputElement).dataset.old = (inp as HTMLInputElement).value;
+    });
+    panel.querySelectorAll('.nc-thumb').forEach((img) => {
+      img.addEventListener('error', () => {
+        (img as HTMLElement).style.display = 'none';
+      });
+    });
+
+    positionPanel(host);
+    panel.style.display = 'block';
+    positionPanel(host); // re-run now offsetHeight is known
+    const first = panel.querySelector('input') as HTMLInputElement | null;
+    if (first) {
+      first.focus();
+      first.select();
+    }
+  }
+
+  function closePanel(): void {
+    panel.style.display = 'none';
+    panelOpen = false;
+    panelTarget = null;
+  }
+
+  function commitAttrInput(input: HTMLInputElement): void {
+    if (!panelTarget) return;
+    const name = input.dataset.attr;
+    if (!name) return;
+    const oldVal = input.dataset.old ?? '';
+    const newVal = input.value;
+    if (newVal === oldVal) return;
+
+    const source = getSource(panelTarget);
+    if (!source) {
+      input.value = oldVal;
+      toast('Lost source info; edit reverted', true);
+      return;
+    }
+    applyValue(panelTarget, name, newVal); // instant visual feedback
+    input.dataset.old = newVal; // so a following blur won't re-commit
+    if (name === 'src') {
+      const thumb = panel.querySelector('.nc-thumb') as HTMLImageElement | null;
+      if (thumb) {
+        thumb.style.display = '';
+        thumb.src = newVal;
+      }
+    }
+    commit({ kind: 'attr', el: panelTarget, source, attr: name, before: oldVal, after: newVal });
+  }
+
+  chip.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (chipTarget) openPanel(chipTarget);
+  });
+
+  panel.addEventListener('keydown', (e) => {
+    const t = e.target as HTMLElement;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closePanel();
+    } else if (e.key === 'Enter' && t instanceof HTMLInputElement) {
+      e.preventDefault();
+      commitAttrInput(t);
+    }
+  });
+  panel.addEventListener('focusout', (e) => {
+    const t = e.target;
+    if (t instanceof HTMLInputElement) commitAttrInput(t);
+  });
+  panel.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('[data-act="close"]')) {
+      e.preventDefault();
+      closePanel();
+    }
+  });
+
+  // Click outside the panel/chip closes it — but commit the focused input first
+  // (this capture handler runs before the input's blur, which would otherwise be
+  // dropped once panelTarget is cleared).
+  document.addEventListener(
+    'mousedown',
+    (e) => {
+      if (!panelOpen) return;
+      const t = e.target;
+      if (t instanceof Element && (t.closest('.nc-panel') || t.closest('.nc-chip')))
+        return;
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement && active.closest('.nc-panel'))
+        commitAttrInput(active);
+      closePanel();
+    },
+    true
+  );
+
   // ---- interaction ---------------------------------------------------------
 
   document.addEventListener(
@@ -544,17 +869,32 @@ whenBodyReady(function initNextCanvas(): void {
     (e) => {
       const el = e.target;
       if (inUI(el)) {
+        // Hovering our own UI (e.g. the chip): keep the chip anchored so it's
+        // clickable; just drop the text outline.
         hideOutline();
         return;
       }
       if (el instanceof HTMLElement && el.isContentEditable) return;
       if (isEditableEl(el)) drawOutline(el);
       else hideOutline();
+      if (!panelOpen) {
+        const host = attrHost(el);
+        if (host) showChip(host);
+        else hideChip();
+      }
     },
     true
   );
 
-  document.addEventListener('scroll', hideOutline, true);
+  document.addEventListener(
+    'scroll',
+    () => {
+      hideOutline();
+      if (panelOpen && panelTarget) positionPanel(panelTarget);
+      else hideChip();
+    },
+    true
+  );
 
   document.addEventListener(
     'dblclick',
@@ -679,7 +1019,7 @@ whenBodyReady(function initNextCanvas(): void {
           if (newText.trim() === '') el.textContent = oldText;
           return;
         }
-        commit(el, source, [oldText], [newText], false);
+        commit({ kind: 'text', el, source, before: [oldText], after: [newText], mixed: false });
         return;
       }
 
@@ -696,7 +1036,7 @@ whenBodyReady(function initNextCanvas(): void {
         return;
       }
       if (runsEqual(newRuns, snap.oldRuns)) return;
-      commit(el, source, snap.oldRuns, newRuns, true);
+      commit({ kind: 'text', el, source, before: snap.oldRuns, after: newRuns, mixed: true });
     },
     true
   );
