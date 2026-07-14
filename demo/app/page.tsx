@@ -94,29 +94,28 @@ export default function Home() {
         <div className="container split">
           <div>
             <p className="eyebrow">integration</p>
-            <h2 className="section-title">Two steps. No config to babysit.</h2>
+            <h2 className="section-title">Two commands. Nothing to wire by hand.</h2>
             <p className="section-sub">
-              Wrap your Next config, run one command, and start editing. There is
-              no Babel setup and nothing to configure by hand.
-            </p>
+              Install it, run one command, and start editing. init wraps your next.config and mounts the overlay for you.
+                                      </p>
             <div className="steps">
               <div className="step">
                 <span className="step-num">1</span>
                 <div>
-                  <h4>Wrap your Next config</h4>
+                  <h4>Install the package</h4>
                   <p>
-                    withCanvas boots the write-back server and injects the SWC
-                    plugin in development only.
+                    Add it as a dev dependency. It ships prebuilt, so there is no
+                    build step on your end.
                   </p>
                 </div>
               </div>
               <div className="step">
                 <span className="step-num">2</span>
                 <div>
-                  <h4>Run the init command</h4>
+                  <h4>Run npx nextcanvas init</h4>
                   <p>
-                    The codemod mounts the overlay in your root layout. That is
-                    the whole setup.
+                    It wraps your next.config with withCanvas and mounts the
+                    overlay in your root layout. Then run next dev.
                   </p>
                 </div>
               </div>
@@ -124,35 +123,34 @@ export default function Home() {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <CodeWindow file="next.config.js">
-              <span className="cmt">{'// next.config.js'}</span>
-              {'\n'}
-              <span className="kw">{'const'}</span>
-              {' { withCanvas } = '}
-              <span className="fn">{'require'}</span>
-              {'('}
-              <span className="str">{"'@rishi-thak/nextcanvas/next'"}</span>
-              {');'}
-              {'\n\n'}
-              {'module.exports = '}
-              <span className="fn">{'withCanvas'}</span>
-              {'({'}
-              {'\n'}
-              {'  '}
-              <span className="cmt">{'/* your existing config */'}</span>
-              {'\n'}
-              {'});'}
-            </CodeWindow>
-
             <CodeWindow file="terminal">
+              <span className="prompt">{'$ '}</span>
+              {'npm i -D @rishi-thak/nextcanvas'}
+              {'\n'}
               <span className="prompt">{'$ '}</span>
               {'npx nextcanvas init'}
               {'\n'}
+              <span className="cmt">{'✓ wrapped next.config.ts with withCanvas'}</span>
+              {'\n'}
               <span className="cmt">{'✓ mounted <NextCanvasOverlay/> in app/layout.tsx'}</span>
               {'\n'}
-              <span className="cmt">{'✓ next.config.js already wraps withCanvas'}</span>
-              {'\n'}
               <span className="cmt">{'→ run `next dev` and double-click any text'}</span>
+            </CodeWindow>
+
+            <CodeWindow file="next.config.ts">
+              <span className="cmt">{'// wired for you by `npx nextcanvas init`'}</span>
+              {'\n'}
+              <span className="kw">{'import'}</span>
+              {' { withCanvas } '}
+              <span className="kw">{'from'}</span>
+              {' '}
+              <span className="str">{"'@rishi-thak/nextcanvas/next'"}</span>
+              {';'}
+              {'\n\n'}
+              <span className="kw">{'export default'}</span>
+              {' '}
+              <span className="fn">{'withCanvas'}</span>
+              {'(nextConfig);'}
             </CodeWindow>
           </div>
         </div>

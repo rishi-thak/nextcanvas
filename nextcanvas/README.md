@@ -7,32 +7,37 @@ written straight back into your source file. Next.js Fast Refresh does the rest.
 **Dev-only.** Everything is gated behind `NODE_ENV === 'development'` and is a
 complete no-op in production builds.
 
-Requires **Next.js 15+** (App Router).
+Requires **Next.js 16.2+** (App Router).
 
-## Install
+## Setup
 
 ```bash
 npm i -D @rishi-thak/nextcanvas
+npx nextcanvas init
 ```
 
-Then two one-time wiring steps:
+`init` wires everything for you — it's idempotent, so it's safe to re-run:
 
-**1. `next.config.js`** — boots the write-back server and injects the source-map
-SWC plugin:
+- **wraps your `next.config.{js,mjs,ts}`** export with `withCanvas` (which boots
+  the write-back server and injects the source-map SWC plugin, dev-only), and
+- **mounts `<NextCanvasOverlay/>`** in your root layout.
+
+Then run `npm run dev`, open the app, and double-click any static text. **No
+`.babelrc`, no `@babel/runtime`** — the source stamp is an SWC plugin, so both
+webpack and Turbopack work.
+
+### Manual setup
+
+Prefer to wire it by hand? `init` just performs these two edits:
+
+**1. `next.config.js`** — wrap your exported config:
 
 ```js
 const { withCanvas } = require('@rishi-thak/nextcanvas/next');
 module.exports = withCanvas({ /* your existing config */ });
 ```
 
-**2. Mount the overlay** — run the codemod, which adds `<NextCanvasOverlay/>` to your
-root layout:
-
-```bash
-npx nextcanvas init
-```
-
-Or add it by hand in `app/layout.tsx`:
+**2. `app/layout.tsx`** — mount the overlay:
 
 ```tsx
 import { NextCanvasOverlay } from '@rishi-thak/nextcanvas';
@@ -48,9 +53,6 @@ export default function RootLayout({ children }) {
   );
 }
 ```
-
-Run `npm run dev`, open the app, and double-click any static text. **No
-`.babelrc`, no `@babel/runtime`** — the stamp is an SWC plugin now.
 
 ## How it works
 

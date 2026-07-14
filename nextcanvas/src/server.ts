@@ -62,11 +62,17 @@ export function applyEdit(edit: Edit): EditResult {
   });
 
   const sourceFile = project.addSourceFileAtPath(fileName);
-  const wanted = String(oldText).trim();
+
+  // Compare with internal whitespace collapsed: the browser hands us the
+  // rendered textContent (runs of whitespace → a single space), while the JSX
+  // source text node may be wrapped across several indented lines. Trimming
+  // alone isn't enough — we must normalize interior whitespace on both sides.
+  const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
+  const wanted = norm(String(oldText));
 
   const candidates = sourceFile
     .getDescendantsOfKind(SyntaxKind.JsxText)
-    .filter((node) => node.getText().trim() === wanted);
+    .filter((node) => norm(node.getText()) === wanted);
 
   if (candidates.length === 0) {
     return {
@@ -96,10 +102,13 @@ export function applyEdit(edit: Edit): EditResult {
     target = candidates[0];
   }
 
-  // Preserve leading/trailing whitespace inside the JSX text node.
+  // Preserve the node's leading/trailing whitespace (its indentation) and
+  // replace the whole text core. This works for single-line text and for
+  // multi-line wrapped text alike (the latter collapses onto one line).
   const full = target.getText();
-  const replaced = full.replace(wanted, String(newText));
-  target.replaceWithText(replaced);
+  const leading = /^\s*/.exec(full)?.[0] ?? '';
+  const trailing = /\s*$/.exec(full)?.[0] ?? '';
+  target.replaceWithText(leading + String(newText) + trailing);
   sourceFile.saveSync();
 
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
