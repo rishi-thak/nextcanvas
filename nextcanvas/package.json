@@ -1,0 +1,46 @@
+{
+  "name": "nextcanvas",
+  "version": "0.0.1",
+  "description": "Turn a locally-running Next.js app into an editable canvas. Double-click text in the browser, edit it, and the source file is rewritten.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "nextcanvas": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "default": "./dist/next.js"
+    },
+    "./overlay": "./dist/overlay.js"
+  },
+  "files": [
+    "dist",
+    "swc",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:wasm": "cargo build --release --manifest-path swc-plugin/Cargo.toml --target wasm32-wasip1 && node scripts/copy-wasm.mjs",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "ts-morph": "^23.0.0"
+  },
+  "peerDependencies": {
+    "next": ">=15",
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.0",
+    "typescript": "^5.6.0"
+  }
+}
