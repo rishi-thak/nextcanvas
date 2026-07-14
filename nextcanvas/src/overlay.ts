@@ -101,6 +101,12 @@ whenBodyReady(function initNextCanvas(): void {
     if (!el || !(el instanceof HTMLElement)) return false;
     if (inUI(el)) return false;
     if (el.isContentEditable) return false;
+    // Must carry its OWN data-loc stamp. The SWC plugin only stamps host
+    // elements whose sole child is static JSXText, so a rendered {expression}
+    // (e.g. a code snippet or a bound value) — which looks identical in the DOM
+    // (a single text node) — is left unstamped and therefore not editable. This
+    // is what stops us outlining elements whose commit would bounce.
+    if (!el.hasAttribute('data-loc')) return false;
     if (el.childNodes.length !== 1) return false;
     const only = el.childNodes[0];
     return only.nodeType === 3 && (el.textContent ?? '').trim().length > 0;

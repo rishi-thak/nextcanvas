@@ -1,8 +1,11 @@
 //! nextcanvas SWC plugin — the SWC-native replacement for the old Babel plugin.
 //!
-//! Stamps `data-loc="<absFile>:<line>:<col>"` onto every **host** (lowercase)
-//! JSX element at compile time. The browser overlay reads this attribute off
-//! the DOM to resolve a clicked element back to its exact source location.
+//! Stamps `data-loc="<absFile>:<line>:<col>"` onto host (lowercase) JSX elements
+//! **whose sole child is a static text node** — i.e. exactly the elements the
+//! write-back server can edit. Elements whose child is a `{expression}` (bound
+//! value), or that have mixed/multiple children, are intentionally left
+//! unstamped so the browser overlay won't outline or offer to edit something
+//! whose commit would just bounce (the server can only rewrite a JSXText node).
 //!
 //! Because it runs inside SWC, it works under **both** the webpack (next-swc)
 //! and Turbopack pipelines — unlike a Babel plugin, which opts Next out of SWC.
@@ -10,8 +13,8 @@
 
 use swc_core::common::{SourceMapper, DUMMY_SP};
 use swc_core::ecma::ast::{
-    IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXElementName,
-    JSXOpeningElement, Program, Str,
+    IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXElement,
+    JSXElementChild, JSXElementName, Program, Str,
 };
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 use swc_core::plugin::metadata::TransformPluginMetadataContextKind;
@@ -23,25 +26,36 @@ struct DataLocStamper {
     source_map: PluginSourceMapProxy,
 }
 
-impl DataLocStamper {
-    fn already_stamped(attrs: &[JSXAttrOrSpread]) -> bool {
-        attrs.iter().any(|a| match a {
-            JSXAttrOrSpread::JSXAttr(attr) => match &attr.name {
-                JSXAttrName::Ident(id) => &*id.sym == "data-loc",
-                JSXAttrName::JSXNamespacedName(_) => false,
-            },
-            JSXAttrOrSpread::SpreadElement(_) => false,
-        })
+/// True only when the element's sole child is a non-whitespace static JSXText —
+/// text the write-back server can actually rewrite. `{expression}` children
+/// (bound values / string literals) and mixed/multiple children return false.
+fn is_single_static_text(children: &[JSXElementChild]) -> bool {
+    if children.len() != 1 {
+        return false;
+    }
+    match &children[0] {
+        JSXElementChild::JSXText(t) => !t.value.trim().is_empty(),
+        _ => false,
     }
 }
 
+fn already_stamped(attrs: &[JSXAttrOrSpread]) -> bool {
+    attrs.iter().any(|a| match a {
+        JSXAttrOrSpread::JSXAttr(attr) => match &attr.name {
+            JSXAttrName::Ident(id) => &*id.sym == "data-loc",
+            JSXAttrName::JSXNamespacedName(_) => false,
+        },
+        JSXAttrOrSpread::SpreadElement(_) => false,
+    })
+}
+
 impl VisitMut for DataLocStamper {
-    fn visit_mut_jsx_opening_element(&mut self, node: &mut JSXOpeningElement) {
+    fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
         node.visit_mut_children_with(self);
 
         // Only host (lowercase) elements render a DOM node; components (Foo)
         // and member/namespaced names (Foo.Bar, ns:tag) are skipped.
-        let sym = match &node.name {
+        let sym = match &node.opening.name {
             JSXElementName::Ident(id) => id.sym.clone(),
             _ => return,
         };
@@ -49,16 +63,21 @@ impl VisitMut for DataLocStamper {
             Some(c) if c.is_ascii_lowercase() => {}
             _ => return,
         }
-        if Self::already_stamped(&node.attrs) {
+
+        // Only stamp what the overlay can actually edit (see is_single_static_text).
+        if !is_single_static_text(&node.children) {
+            return;
+        }
+        if already_stamped(&node.opening.attrs) {
             return;
         }
 
         // Byte-offset span -> (line, column). Column made 1-based to match the
         // old Babel stamp (`loc.start.column + 1`).
-        let loc = self.source_map.lookup_char_pos(node.span.lo);
+        let loc = self.source_map.lookup_char_pos(node.opening.span.lo);
         let value = format!("{}:{}:{}", self.filename, loc.line, loc.col.0 + 1);
 
-        node.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+        node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
             name: JSXAttrName::Ident(IdentName::new("data-loc".into(), DUMMY_SP)),
             value: Some(JSXAttrValue::Str(Str {
