@@ -180,6 +180,39 @@ Only webpack-on-Windows is verified in this repo (the dev machine is Windows).
 Turbopack-on-Windows is blocked upstream; the rest are expected to work because
 only the bundler/OS differs — same wasm, same config.
 
+## TODO — pick up here (Turbopack support)
+
+**Problem:** nextcanvas does **not work under Turbopack** (`next dev --turbo`, and
+`next dev` defaults to Turbopack in Next 16). Editing/overlay effectively don't
+function. Everything works under **webpack** (`next dev --webpack`), which is why
+`demo`'s `dev` script forces `--webpack`.
+
+**What's known:**
+- The `data-loc` SWC plugin (`swc/nextcanvas_swc.wasm`, injected via
+  `experimental.swcPlugins`) is not executed by Turbopack on Windows — upstream
+  gap: "windows imports are not implemented yet"
+  (vercel/next.js#84972, #78156). No stamps ⇒ no source resolution ⇒ no editing.
+- `withCanvas` already normalizes the wasm path to forward slashes so Turbopack
+  at least doesn't hard-crash the app (it 200s, but the plugin silently no-ops).
+
+**To investigate / do next:**
+1. Reproduce on a non-Windows machine: does the wasm swcPlugin run under
+   Turbopack on macOS/Linux? If yes, the failure is Windows-specific only.
+2. Determine whether the **overlay/toolbar** loads under Turbopack independent of
+   stamping (it's served from `:3131/overlay.js` and injected by
+   `<NextCanvasOverlay/>`, so it *should* appear even with no stamps — confirm
+   with `curl :3131/overlay.js | grep -c nc-root` and a browser).
+3. Options if Turbopack wasm stays broken: (a) wait on upstream; (b) detect
+   Turbopack and print a clear "use --webpack" warning from `withCanvas`;
+   (c) explore a Turbopack-compatible source stamp (e.g. a Next-supported
+   transform, or reading the dev JSX runtime's `__source` if/when available).
+4. Update the bundler/OS matrix above once verified on other machines.
+
+**Reminder for the other machine:** `dist/` and `swc-plugin/target/` are
+gitignored. After pulling, run `npm install` (or `npm run build`) inside
+`nextcanvas/` to rebuild `dist/` before the demo will pick up source changes,
+then fully restart `next dev` (`rm -rf demo/.next`, kill any stray :3131 server).
+
 ## Current scope
 
 Static JSX text only (`<h1>Hello</h1>`). Bound values (`<h1>{title}</h1>`) and
