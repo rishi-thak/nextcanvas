@@ -1,6 +1,9 @@
 {
-  "name": "nextcanvas",
-  "version": "0.0.1",
+  "name": "@rishi-thak/nextcanvas",
+  "version": "0.0.2",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Turn a locally-running Next.js app into an editable canvas. Double-click text in the browser, edit it, and the source file is rewritten.",
   "license": "MIT",
   "main": "dist/index.js",

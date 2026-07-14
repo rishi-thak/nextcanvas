@@ -47,7 +47,7 @@ function patchLayout(): void {
   if (!layout) {
     warn(
       'No app/layout.{tsx,jsx,js} found. Add <NextCanvasOverlay/> to your root layout manually:\n' +
-        `      import { NextCanvasOverlay } from 'nextcanvas';\n` +
+        `      import { NextCanvasOverlay } from '@rishi-thak/nextcanvas';\n` +
         `      ...\n      ${OVERLAY_SNIPPET}`
     );
     return;
@@ -61,7 +61,7 @@ function patchLayout(): void {
   }
 
   // Add the import just after the last existing import statement.
-  const importLine = "import { NextCanvasOverlay } from 'nextcanvas';";
+  const importLine = "import { NextCanvasOverlay } from '@rishi-thak/nextcanvas';";
   const importRe = /^import[^\n]*$/gm;
   let lastEnd = -1;
   let m: RegExpExecArray | null;
@@ -93,7 +93,7 @@ function checkConfig(): void {
     'next.config.cjs',
   ]);
   const snippet =
-    "  const { withCanvas } = require('nextcanvas/next');\n" +
+    "  const { withCanvas } = require('@rishi-thak/nextcanvas/next');\n" +
     '  module.exports = withCanvas(nextConfig);';
 
   if (!cfg) {
@@ -119,9 +119,9 @@ function checkBabel(): void {
   const babelrc = firstExisting(['.babelrc', '.babelrc.json', 'babel.config.js']);
   if (!babelrc) return;
   const code = fs.readFileSync(babelrc, 'utf8');
-  if (code.includes('nextcanvas/babel')) {
+  if (code.includes('@rishi-thak/nextcanvas/babel')) {
     warn(
-      `${path.relative(cwd, babelrc)} references the old "nextcanvas/babel" plugin. ` +
+      `${path.relative(cwd, babelrc)} references the old "@rishi-thak/nextcanvas/babel" plugin. ` +
         'nextcanvas now uses an SWC plugin (works with webpack AND Turbopack), so ' +
         'remove that entry — and the .babelrc entirely if nothing else needs it.'
     );

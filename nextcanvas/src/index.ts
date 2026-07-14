@@ -3,7 +3,7 @@
 /**
  * <NextCanvasOverlay /> — mounts the browser overlay. Drop it once in app/layout:
  *
- *   import { NextCanvasOverlay } from 'nextcanvas';
+ *   import { NextCanvasOverlay } from '@rishi-thak/nextcanvas';
  *   ...
  *   {process.env.NODE_ENV === 'development' && <NextCanvasOverlay />}
  *

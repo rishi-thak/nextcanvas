@@ -1,16 +1,18 @@
 import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
-import { NextCanvasOverlay } from 'nextcanvas';
+import { NextCanvasOverlay } from '@rishi-thak/nextcanvas';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'nextcanvas demo',
-  description: 'Double-click any text to edit it in place.',
+  title: 'nextcanvas — edit your Next.js app in the browser',
+  description:
+    'A dev tool that turns your locally-running Next.js app into an editable canvas. Double-click any text, edit it, and the change is written straight back to your source.',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body style={{ margin: 0, fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
+      <body>
         {children}
         {process.env.NODE_ENV === 'development' && <NextCanvasOverlay />}
       </body>

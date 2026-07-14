@@ -1,4 +1,4 @@
-const { withCanvas } = require('nextcanvas/next');
+const { withCanvas } = require('@rishi-thak/nextcanvas/next');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {

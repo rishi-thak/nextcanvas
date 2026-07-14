@@ -4,7 +4,7 @@
  * is an SWC plugin (not Babel) that runs inside Next's own compiler.
  *
  *   // next.config.js
- *   const { withCanvas } = require('nextcanvas/next');
+ *   const { withCanvas } = require('@rishi-thak/nextcanvas/next');
  *   module.exports = withCanvas({ /* your existing config *\/ });
  *
  * In dev, withCanvas:
