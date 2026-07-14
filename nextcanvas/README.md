@@ -12,7 +12,7 @@ Requires **Next.js 15+** (App Router).
 ## Install
 
 ```bash
-npm i -D nextcanvas
+npm i -D @rishi-thak/nextcanvas
 ```
 
 Then two one-time wiring steps:
@@ -21,7 +21,7 @@ Then two one-time wiring steps:
 SWC plugin:
 
 ```js
-const { withCanvas } = require('nextcanvas/next');
+const { withCanvas } = require('@rishi-thak/nextcanvas/next');
 module.exports = withCanvas({ /* your existing config */ });
 ```
 
@@ -35,7 +35,7 @@ npx nextcanvas init
 Or add it by hand in `app/layout.tsx`:
 
 ```tsx
-import { NextCanvasOverlay } from 'nextcanvas';
+import { NextCanvasOverlay } from '@rishi-thak/nextcanvas';
 
 export default function RootLayout({ children }) {
   return (

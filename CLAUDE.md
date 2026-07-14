@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Version control rules (STRICT — read first)
+
+- **NEVER create branches, pull requests, tags, or releases** unless the user
+  explicitly instructs it in that message.
+- **NEVER run `git add`, `git commit`, `git push`** (or any equivalent that
+  stages/records/publishes changes) unless the user explicitly instructs it in
+  that message.
+- **NEVER suggest, offer, or ask to** commit, push, branch, open a PR, or
+  otherwise do any of the above. Do not end responses with prompts like "want me
+  to commit this?" Just leave the working tree changed and stop.
+- Explicit instruction means the user names the action ("commit this", "push",
+  "open a PR"). Past permission does **not** carry over to later turns — each
+  action needs its own explicit instruction.
+
 ## What this is
 
 `nextcanvas` is a drop-in dev tool that turns a locally-running **Next.js App
