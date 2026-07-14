@@ -1,11 +1,15 @@
 //! nextcanvas SWC plugin — the SWC-native replacement for the old Babel plugin.
 //!
 //! Stamps `data-loc="<absFile>:<line>:<col>"` onto host (lowercase) JSX elements
-//! **whose sole child is a static text node** — i.e. exactly the elements the
-//! write-back server can edit. Elements whose child is a `{expression}` (bound
-//! value), or that have mixed/multiple children, are intentionally left
-//! unstamped so the browser overlay won't outline or offer to edit something
-//! whose commit would just bounce (the server can only rewrite a JSXText node).
+//! the write-back server can edit — i.e. an element that has EITHER:
+//!   - a sole static-text child (`<h1>Hello</h1>`; editable text), OR
+//!   - at least one editable string-literal attribute (`<img src="/a.png"/>`,
+//!     `<a href="/x">…</a>`; editable attribute value).
+//! Elements whose text child is a `{expression}` (bound value) or that have
+//! mixed/multiple children — and whose attributes are all `{expr}` — are
+//! intentionally left unstamped, so the browser overlay won't offer to edit
+//! something whose commit would just bounce (the server can only rewrite a
+//! JSXText node or a string-literal JSXAttr).
 //!
 //! Because it runs inside SWC, it works under **both** the webpack (next-swc)
 //! and Turbopack pipelines — unlike a Babel plugin, which opts Next out of SWC.
@@ -24,6 +28,39 @@ use swc_core::plugin::proxies::{PluginSourceMapProxy, TransformPluginProgramMeta
 struct DataLocStamper {
     filename: String,
     source_map: PluginSourceMapProxy,
+}
+
+/// Attributes the write-back server can rewrite (each must be a plain string
+/// literal in source, e.g. `src="/a.png"`). Kept in sync with EDITABLE_ATTRS in
+/// `src/overlay.ts`. `aria-label` is a single hyphenated JSX identifier.
+const EDITABLE_ATTRS: [&str; 6] = ["src", "href", "alt", "title", "placeholder", "aria-label"];
+
+/// The whitelisted attributes on this element whose value is a **string literal**
+/// (`src="…"`) — NOT a `{expression}`, which the server can't rewrite. This is
+/// what makes `<img>`/`<a>` (no static-text child) editable, and — crucially —
+/// it's emitted to the browser as `data-nc-attrs` so the overlay edits only
+/// these and never mistakes a bound `href={x}` (a resolved URL in the DOM, which
+/// looks identical to a literal) for an editable one.
+fn editable_string_attrs(attrs: &[JSXAttrOrSpread]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter_map(|a| match a {
+            JSXAttrOrSpread::JSXAttr(attr) => {
+                let name = match &attr.name {
+                    JSXAttrName::Ident(id) => &*id.sym,
+                    JSXAttrName::JSXNamespacedName(_) => return None,
+                };
+                if EDITABLE_ATTRS.contains(&name)
+                    && matches!(attr.value, Some(JSXAttrValue::Str(_)))
+                {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            }
+            JSXAttrOrSpread::SpreadElement(_) => None,
+        })
+        .collect()
 }
 
 /// True only when the element's sole child is a non-whitespace static JSXText —
@@ -64,8 +101,10 @@ impl VisitMut for DataLocStamper {
             _ => return,
         }
 
-        // Only stamp what the overlay can actually edit (see is_single_static_text).
-        if !is_single_static_text(&node.children) {
+        // Only stamp what the overlay can actually edit: a single static-text
+        // child (editable text) OR ≥1 editable string-literal attribute.
+        let attr_names = editable_string_attrs(&node.opening.attrs);
+        if !is_single_static_text(&node.children) && attr_names.is_empty() {
             return;
         }
         if already_stamped(&node.opening.attrs) {
@@ -86,6 +125,21 @@ impl VisitMut for DataLocStamper {
                 raw: None,
             })),
         }));
+
+        // Tell the overlay exactly which attributes are safe to edit (string
+        // literals in source). Without this it can't tell a literal `href="/x"`
+        // from a bound `href={x}` — both are just a resolved value in the DOM.
+        if !attr_names.is_empty() {
+            node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                span: DUMMY_SP,
+                name: JSXAttrName::Ident(IdentName::new("data-nc-attrs".into(), DUMMY_SP)),
+                value: Some(JSXAttrValue::Str(Str {
+                    span: DUMMY_SP,
+                    value: attr_names.join(" ").into(),
+                    raw: None,
+                })),
+            }));
+        }
     }
 }
 
