@@ -41,6 +41,16 @@ interface Edit {
   attrName?: string;
 }
 
+interface StyleEdit {
+  fileName: string;
+  lineNumber?: number;
+  columnNumber?: number;
+  /** camelCase style key, e.g. "color", "fontSize", "textAlign". */
+  property: string;
+  /** New value; empty/null means remove the property from the inline object. */
+  value?: string | null;
+}
+
 interface EditResult {
   ok: boolean;
   error?: string;
@@ -48,6 +58,8 @@ interface EditResult {
   lineNumber?: number;
   oldText?: string;
   newText?: string;
+  property?: string;
+  value?: string | null;
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -283,6 +295,118 @@ export function applyAttrEdit(edit: Edit): EditResult {
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
 }
 
+/** A single-quoted JS string literal, safe for arbitrary CSS values. */
+function jsString(value: string): string {
+  return "'" + value.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+}
+
+/** camelCase style keys are valid identifiers; quote anything unexpected. */
+function styleKey(property: string): string {
+  return /^[A-Za-z_$][\w$]*$/.test(property) ? property : jsString(property);
+}
+
+/**
+ * Set (or remove) one property of an element's inline `style={{...}}` object.
+ *
+ * The element is located by the same `data-loc` the overlay reads: we find the
+ * JSX opening element whose tag starts on `lineNumber` (disambiguating by
+ * `columnNumber` when several share a line). Only a literal `style={{...}}` is
+ * editable — `style={someVar}` is rejected rather than silently mangled.
+ *
+ * Writing back is the inverse of a "remove": an empty/null `value` deletes the
+ * key (and drops an empty `style` attribute entirely), which is exactly what the
+ * overlay sends to undo a style that had no prior inline value. So this stays
+ * stateless — the client owns before/after; the server just set-or-removes.
+ */
+export function applyStyleEdit(edit: StyleEdit): EditResult {
+  const { Project, SyntaxKind, Node } =
+    require('ts-morph') as typeof import('ts-morph');
+
+  const { fileName, lineNumber, columnNumber, property } = edit;
+  if (!fileName) return { ok: false, error: 'missing fileName' };
+  if (!property) return { ok: false, error: 'missing style property' };
+  const value = edit.value == null ? '' : String(edit.value);
+  const remove = value.trim() === '';
+
+  const project = new Project({
+    compilerOptions: { allowJs: true, jsx: 4 /* preserve */ },
+    skipAddingFilesFromTsConfig: true,
+  });
+  const sourceFile = project.addSourceFileAtPath(fileName);
+
+  const opens = [
+    ...sourceFile.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+    ...sourceFile.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+  ].filter((n) => n.getStartLineNumber() === Number(lineNumber));
+
+  if (opens.length === 0) {
+    return {
+      ok: false,
+      error: `No JSX element found at ${fileName}:${lineNumber} to style.`,
+    };
+  }
+
+  // Several host elements can open on one line; pick the one whose start column
+  // is closest to the stamped column.
+  let target = opens[0];
+  if (opens.length > 1 && columnNumber) {
+    target = opens
+      .map((n) => ({
+        n,
+        d: Math.abs(
+          sourceFile.getLineAndColumnAtPos(n.getStart()).column -
+            Number(columnNumber)
+        ),
+      }))
+      .sort((a, b) => a.d - b.d)[0].n;
+  }
+
+  const styleAttr = target.getAttribute('style');
+
+  if (!styleAttr) {
+    if (remove) return { ok: true, fileName, lineNumber, property, value: '' };
+    target.addAttribute({
+      name: 'style',
+      initializer: `{{ ${styleKey(property)}: ${jsString(value)} }}`,
+    });
+    sourceFile.saveSync();
+    return { ok: true, fileName, lineNumber, property, value };
+  }
+
+  if (!Node.isJsxAttribute(styleAttr)) {
+    return { ok: false, error: 'style attribute is a spread; cannot edit.' };
+  }
+  const init = styleAttr.getInitializer();
+  const expr = Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!expr || !Node.isObjectLiteralExpression(expr)) {
+    return {
+      ok: false,
+      error:
+        'nextcanvas can only edit an inline style={{ ... }} object literal on this element.',
+    };
+  }
+
+  const existing = expr.getProperty(property);
+  if (remove) {
+    if (existing) existing.remove();
+    if (expr.getProperties().length === 0) styleAttr.remove();
+    sourceFile.saveSync();
+    return { ok: true, fileName, lineNumber, property, value: '' };
+  }
+
+  if (existing && Node.isPropertyAssignment(existing)) {
+    existing.setInitializer(jsString(value));
+  } else {
+    if (existing) existing.remove();
+    expr.addPropertyAssignment({
+      name: styleKey(property),
+      initializer: jsString(value),
+    });
+  }
+  sourceFile.saveSync();
+  return { ok: true, fileName, lineNumber, property, value };
+}
+
 function handler(req: IncomingMessage, res: ServerResponse): void {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.method === 'GET' && req.url === '/health') {
@@ -305,7 +429,9 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
     });
     return;
   }
-  if (req.method !== 'POST' || req.url !== '/edit') {
+  const isText = req.method === 'POST' && req.url === '/edit';
+  const isStyle = req.method === 'POST' && req.url === '/style';
+  if (!isText && !isStyle) {
     return send(res, 404, { ok: false, error: 'not found' });
   }
 
@@ -315,18 +441,24 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
     if (raw.length > 1_000_000) req.destroy(); // basic guard
   });
   req.on('end', () => {
-    let edit: Edit;
+    let payload: Edit & StyleEdit;
     try {
-      edit = JSON.parse(raw);
+      payload = JSON.parse(raw);
     } catch {
       return send(res, 400, { ok: false, error: 'invalid JSON' });
     }
     try {
-      const result = edit.attrName ? applyAttrEdit(edit) : applyEdit(edit);
+      const result = isStyle
+        ? applyStyleEdit(payload)
+        : payload.attrName
+          ? applyAttrEdit(payload)
+          : applyEdit(payload);
       const status = result.ok ? 200 : 422;
       if (result.ok) {
         console.log(
-          `[nextcanvas] edited ${result.fileName}: "${result.oldText}" -> "${result.newText}"`
+          isStyle
+            ? `[nextcanvas] styled ${result.fileName}: ${result.property} = "${result.value}"`
+            : `[nextcanvas] edited ${result.fileName}: "${result.oldText}" -> "${result.newText}"`
         );
       } else {
         console.warn(`[nextcanvas] rejected edit: ${result.error}`);
