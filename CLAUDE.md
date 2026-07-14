@@ -286,12 +286,45 @@ pulling, run `npm install` (or `npm run build`) inside `nextcanvas/` to rebuild
 
 ## Current scope
 
-Static JSX text (`<h1>Hello</h1>`) **and** text mixed with inline child elements
-(`<p>Hello <strong>world</strong>!</p>`), where the surrounding text runs are
-editable and the inline elements are locked + preserved. Bound values
-(`<h1>{title}</h1>`) — any element with a direct `{expression}` child — are left
-unstamped and not editable. Repeated components sharing one source line (via
-`.map`) edit the shared source, affecting all instances.
+Three edit kinds, all dev-only and written back through the :3131 server.
+
+**Text editing.** Static JSX text (`<h1>Hello</h1>`) **and** text mixed with
+inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
+surrounding text runs are editable and the inline elements are locked +
+preserved. Bound values (`<h1>{title}</h1>`) — any element with a direct
+`{expression}` child — are left unstamped and not editable. Repeated components
+sharing one source line (via `.map`) edit the shared source, affecting all
+instances.
+
+**Attribute editing.** Whitelisted string-literal JSX attributes (`src`, `href`,
+`alt`, `title`, `placeholder`, `aria-label`) via a hover chip + attribute panel.
+The plugin lists an element's editable attrs in `data-nc-attrs` (string literals
+only, never `{expr}` bindings — both look identical in the DOM), and the overlay
+edits exactly those. Written by `applyAttrEdit` in `server.ts` (`POST /edit`
+with `attrName`); `setLiteralValue` preserves the original quoting.
+
+**Style editing.** Single-click selects any stamped element and opens the style
+panel (color / background / font-size / font-weight / text-align / padding),
+which rewrites the element's inline `style={{...}}` via `applyStyleEdit` in
+`src/server.ts` (`POST /style`). Inline style only — no Tailwind/className
+rewriting yet (the `applyStyleEdit` locate-then-set/remove contract is the seam a
+Tailwind-class layer would plug into). Only a literal `style={{...}}` object is
+editable; `style={someVar}` is rejected.
+
+### Overlay lifecycle (unified Change model)
+
+All three kinds ride one discriminated `Change` union in `src/overlay.ts`
+(`kind: 'text' | 'attr' | 'style'`) and a shared undo/redo stack. Text and attr
+edits share the autosave/manual-staging lifecycle (typed `EditChange`); style
+edits always write immediately (see the TODO below). The `staged` map is
+string-keyed by loc(+attr) so one element can stage its text AND several
+attributes independently — `StagedEdit` carries `kind`, `attr?`, `oldRuns`
+(text runs, or the single attr value in `oldRuns[0]`), and `mixed`. Kind-aware
+helpers (`writeForward`/`writeReverse`, `applyChangeDom`, `keyFor`,
+`stageChange`) branch on `kind`; `applyChange(change, to)` drives undo/redo.
+**The attribute panel is namespaced `nc-attr-*` / `attrPanel`** to avoid
+colliding with the style panel's `nc-*` / `panel` (both features independently
+added a `.nc-panel` + `const panel`; keep them distinct).
 
 ### Mixed-children edits (the segmented protocol)
 
@@ -322,3 +355,26 @@ Non-obvious constraints learned building this — **do not re-learn the hard way
 
 Legacy single-text payloads still work unchanged (overlay sends `oldText/newText`
 when the element has no child elements; server falls through to the old path).
+
+### TODO — wire style edits into Manual-mode staging
+
+Style edits currently **always autosave** (write to source on every control
+change), regardless of the Autosave/Manual toolbar mode — they do ride the shared
+undo/redo stack, but they bypass the `staged` map that Manual mode uses to batch
+text and attribute edits behind the Save button. So in Manual mode, text/attr
+changes stage while style changes still write immediately, which is inconsistent.
+
+To fix: extend the Manual-mode staging path (`staged` in `src/overlay.ts`, plus
+`save()`) to also hold pending style changes so a `<h1>` re-color waits for Save
+just like a text edit. Sketch:
+- Add a `'style'` variant to `StagedEdit` (per element+property) — the `staged`
+  map is already string-keyed via `stageKey`, so extend `stageKey`/`keyFor` to
+  key style edits by `property` the way attr edits key by `attr`, and carry the
+  before/after style value.
+- `commitStyle` should branch on `mode` like `commit` does: autosave → write
+  now; manual → stage + toast "Staged", and count toward `stagedDirtyCount()` /
+  the Save badge (`stagedIsDirty` would need a style branch).
+- `save()` must flush staged style changes through `writeStyle` (currently it
+  only iterates text/attr edits), and `setMode('autosave')` must flush them too.
+- `applyChange`'s style branch (undo/redo) already writes immediately; once
+  staged, undo of an unsaved style change should just un-stage instead.
