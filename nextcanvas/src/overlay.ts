@@ -4,7 +4,10 @@
  * Responsibilities:
  *   - highlight text-bearing elements on hover,
  *   - on double-click, make a static-text element editable,
- *   - track an undo/redo history of edits,
+ *   - on single-click, select any stamped element and open a right-side style
+ *     panel (color / background / font-size / weight / align / padding) that
+ *     rewrites the element's inline style={{...}} in source,
+ *   - track an undo/redo history of edits (text and style),
  *   - a bottom-right toolbar (like Next.js dev tools) with undo/redo, a mode
  *     switch (Autosave vs. Manual), a Save button, and a hide toggle,
  *   - write edits back to source via the write-back server.
@@ -22,14 +25,44 @@ interface NextCanvasSource {
   columnNumber: number;
 }
 
-interface Change {
+interface TextChange {
+  kind: 'text';
   el: HTMLElement;
   source: NextCanvasSource;
   before: string;
   after: string;
 }
 
+interface StyleChange {
+  kind: 'style';
+  el: HTMLElement;
+  source: NextCanvasSource;
+  /** camelCase style key, e.g. "color", "fontSize". */
+  property: string;
+  /** Prior inline value ('' when the element had no inline value for it). */
+  before: string;
+  after: string;
+}
+
+type Change = TextChange | StyleChange;
+
 type NextCanvasMode = 'autosave' | 'manual';
+
+/** The design controls the style panel exposes, in render order. */
+interface StyleControl {
+  property: string; // camelCase DOM/React style key
+  label: string;
+  kind: 'color' | 'length' | 'weight' | 'align';
+}
+
+const STYLE_CONTROLS: StyleControl[] = [
+  { property: 'color', label: 'Text', kind: 'color' },
+  { property: 'backgroundColor', label: 'Background', kind: 'color' },
+  { property: 'fontSize', label: 'Font size', kind: 'length' },
+  { property: 'fontWeight', label: 'Weight', kind: 'weight' },
+  { property: 'textAlign', label: 'Align', kind: 'align' },
+  { property: 'padding', label: 'Padding', kind: 'length' },
+];
 
 function whenBodyReady(fn: () => void): void {
   if (typeof document === 'undefined') return;
@@ -45,10 +78,31 @@ whenBodyReady(function initNextCanvas(): void {
   if (window.__nextCanvasLoaded) return;
   window.__nextCanvasLoaded = true;
 
-  const SERVER =
-    (window.__NEXTCANVAS_SERVER__ || 'http://localhost:3131') + '/edit';
+  const BASE = window.__NEXTCANVAS_SERVER__ || 'http://localhost:3131';
+  const SERVER = BASE + '/edit';
+  const STYLE_SERVER = BASE + '/style';
 
   const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
+
+  /** rgb()/rgba() → #rrggbb (drops alpha); pass through if already hex. */
+  function rgbToHex(color: string): string {
+    if (!color) return '#000000';
+    if (color[0] === '#') return color;
+    const m = color.match(/\d+(\.\d+)?/g);
+    if (!m || m.length < 3) return '#000000';
+    const hex = (n: string) =>
+      Math.max(0, Math.min(255, Math.round(Number(n))))
+        .toString(16)
+        .padStart(2, '0');
+    return '#' + hex(m[0]) + hex(m[1]) + hex(m[2]);
+  }
+
+  /** Is a computed color effectively transparent (so we show it as "unset")? */
+  function isTransparent(color: string): boolean {
+    if (!color) return true;
+    const m = color.match(/[\d.]+/g);
+    return color === 'transparent' || (m != null && m.length >= 4 && Number(m[3]) === 0);
+  }
 
   function lsGet(key: string): string | null {
     try {
@@ -75,6 +129,8 @@ whenBodyReady(function initNextCanvas(): void {
   const redoStack: Change[] = [];
   // Manual-mode staging: element -> its original source text (+ location).
   const staged = new Map<HTMLElement, { source: NextCanvasSource; oldText: string }>();
+  // The element currently selected for styling (null when nothing is selected).
+  let selected: HTMLElement | null = null;
 
   // ---- source resolution ---------------------------------------------------
 
@@ -110,6 +166,16 @@ whenBodyReady(function initNextCanvas(): void {
     if (el.childNodes.length !== 1) return false;
     const only = el.childNodes[0];
     return only.nodeType === 3 && (el.textContent ?? '').trim().length > 0;
+  }
+
+  // Style editing is broader than text editing: any element carrying its own
+  // `data-loc` stamp can have its inline style rewritten, regardless of whether
+  // its children are static text (a <div className=...> wrapper is fair game).
+  function isStylableEl(el: EventTarget | null): el is HTMLElement {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    if (inUI(el)) return false;
+    if (el.isContentEditable) return false;
+    return el.hasAttribute('data-loc');
   }
 
   // ---- styles --------------------------------------------------------------
@@ -172,6 +238,55 @@ whenBodyReady(function initNextCanvas(): void {
       border: 0; box-shadow: 0 8px 30px rgba(0,0,0,.5); cursor: pointer;
       font-size: 16px; display: grid; place-items: center;
     }
+    .nextcanvas-selected {
+      position: fixed; pointer-events: none; z-index: 2147483644;
+      border: 1.5px dashed #a78bfa; border-radius: 3px;
+      box-shadow: 0 0 0 2px rgba(167,139,250,0.25);
+    }
+    .nc-panel {
+      position: fixed; top: 16px; right: 16px; width: 244px; z-index: 2147483647;
+      background: #0d0d12; color: #f5f5f7;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 12px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.5);
+      font: 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+      overflow: hidden;
+    }
+    .nc-panel-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .nc-panel-title { font-weight: 600; color: #a78bfa; }
+    .nc-panel-tag { color: #6b7280; font-family: ui-monospace, monospace; }
+    .nc-panel-body { padding: 6px 12px 12px; display: flex; flex-direction: column; gap: 2px; }
+    .nc-row {
+      display: flex; align-items: center; gap: 8px; min-height: 34px;
+    }
+    .nc-row > label { flex: 0 0 74px; color: #a2a2b4; }
+    .nc-row > .nc-ctl { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; }
+    .nc-swatch {
+      width: 24px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px; background: none; cursor: pointer;
+    }
+    .nc-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+    .nc-swatch::-webkit-color-swatch { border: none; border-radius: 4px; }
+    .nc-hex, .nc-len {
+      flex: 1 1 auto; width: 100%; min-width: 0; box-sizing: border-box;
+      background: rgba(255,255,255,0.05); color: #f5f5f7;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;
+      padding: 5px 7px; font: inherit; font-family: ui-monospace, monospace;
+    }
+    .nc-hex:focus, .nc-len:focus { outline: 1px solid #6d28d9; }
+    .nc-seg { display: flex; background: rgba(255,255,255,0.06); border-radius: 7px; padding: 2px; gap: 2px; }
+    .nc-seg button {
+      flex: 1 1 auto; border: 0; background: transparent; color: #a2a2b4;
+      font: inherit; padding: 4px 0; border-radius: 5px; cursor: pointer; min-width: 26px;
+    }
+    .nc-seg button.nc-on { background: #6d28d9; color: #fff; }
+    .nc-clear {
+      border: 0; background: transparent; color: #6b7280; cursor: pointer;
+      font-size: 14px; padding: 0 2px; line-height: 1;
+    }
+    .nc-clear:hover { color: #f5f5f7; }
   `;
   document.head.appendChild(style);
 
@@ -191,6 +306,23 @@ whenBodyReady(function initNextCanvas(): void {
   }
   function hideOutline(): void {
     outline.style.display = 'none';
+  }
+
+  // Persistent outline for the element selected in the style panel.
+  const selOutline = document.createElement('div');
+  selOutline.className = 'nextcanvas-selected';
+  selOutline.style.display = 'none';
+  selOutline.setAttribute('data-nextcanvas-ui', '');
+  document.body.appendChild(selOutline);
+
+  function drawSelOutline(): void {
+    if (!selected || !selected.isConnected) return;
+    const r = selected.getBoundingClientRect();
+    selOutline.style.display = 'block';
+    selOutline.style.left = r.left + 'px';
+    selOutline.style.top = r.top + 'px';
+    selOutline.style.width = r.width + 'px';
+    selOutline.style.height = r.height + 'px';
   }
 
   function toast(msg: string, isErr?: boolean): void {
@@ -280,6 +412,35 @@ whenBodyReady(function initNextCanvas(): void {
     }
   }
 
+  async function writeStyle(
+    source: NextCanvasSource,
+    property: string,
+    value: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const res = await fetch(STYLE_SERVER, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: source.fileName,
+          lineNumber: source.lineNumber,
+          columnNumber: source.columnNumber,
+          property,
+          value,
+        }),
+      });
+      return await res.json();
+    } catch {
+      return { ok: false, error: 'Could not reach the nextcanvas server' };
+    }
+  }
+
+  /** Set or clear one inline style property in the live DOM (instant preview). */
+  function applyInlineStyle(el: HTMLElement, property: string, value: string): void {
+    // Indexing the CSSStyleDeclaration by camelCase key; '' removes it.
+    (el.style as unknown as Record<string, string>)[property] = value;
+  }
+
   // ---- edit lifecycle ------------------------------------------------------
 
   function commit(
@@ -289,7 +450,7 @@ whenBodyReady(function initNextCanvas(): void {
     after: string
   ): void {
     if (norm(before) === norm(after)) return;
-    const change: Change = { el, source, before, after };
+    const change: Change = { kind: 'text', el, source, before, after };
     undoStack.push(change);
     redoStack.length = 0;
 
@@ -312,18 +473,69 @@ whenBodyReady(function initNextCanvas(): void {
     refreshUI();
   }
 
+  // Commit one style property change. Unlike text, style edits always write to
+  // source immediately (no manual staging in v1), but they DO ride the shared
+  // undo/redo stack. `before` is the element's prior *inline* value ('' if the
+  // property wasn't inline-set), so undo restores it — including removing an
+  // inline value we introduced.
+  function commitStyle(
+    el: HTMLElement,
+    source: NextCanvasSource,
+    property: string,
+    before: string,
+    after: string
+  ): void {
+    if (before === after) return;
+    applyInlineStyle(el, property, after);
+    const change: StyleChange = { kind: 'style', el, source, property, before, after };
+    undoStack.push(change);
+    redoStack.length = 0;
+    writeStyle(source, property, after).then((r) => {
+      if (r.ok) {
+        toast('Styled — Fast Refresh will update the view');
+      } else {
+        toast(r.error || 'Style edit rejected', true);
+        if (el.isConnected) applyInlineStyle(el, property, before);
+        const i = undoStack.indexOf(change);
+        if (i >= 0) undoStack.splice(i, 1);
+        if (selected === el) populatePanel();
+        refreshUI();
+      }
+    });
+    refreshUI();
+  }
+
+  // Roll `change` to one of its ends: `before` when undoing, `after` when
+  // redoing. Style edits always write to source (they don't participate in
+  // manual-mode text staging).
+  function applyChange(change: Change, to: 'before' | 'after'): void {
+    const value = change[to];
+    if (change.kind === 'style') {
+      if (change.el.isConnected) applyInlineStyle(change.el, change.property, value);
+      writeStyle(change.source, change.property, value).then((r) => {
+        if (!r.ok) toast(r.error || 'Style change failed', true);
+      });
+      if (selected === change.el) populatePanel();
+      return;
+    }
+    if (change.el.isConnected) change.el.textContent = value;
+    if (mode === 'autosave') {
+      const from = to === 'before' ? change.after : change.before;
+      writeSource(change.source, from, value).then((r) => {
+        if (!r.ok) toast(r.error || 'Change failed', true);
+      });
+    } else if (to === 'before') {
+      const s = staged.get(change.el);
+      if (s && norm(value) === norm(s.oldText)) staged.delete(change.el);
+    } else if (!staged.has(change.el)) {
+      staged.set(change.el, { source: change.source, oldText: change.before });
+    }
+  }
+
   function undo(): void {
     const change = undoStack.pop();
     if (!change) return;
-    if (change.el.isConnected) change.el.textContent = change.before;
-    if (mode === 'autosave') {
-      writeSource(change.source, change.after, change.before).then((r) => {
-        if (!r.ok) toast(r.error || 'Undo failed', true);
-      });
-    } else {
-      const s = staged.get(change.el);
-      if (s && norm(change.before) === norm(s.oldText)) staged.delete(change.el);
-    }
+    applyChange(change, 'before');
     redoStack.push(change);
     refreshUI();
   }
@@ -331,15 +543,7 @@ whenBodyReady(function initNextCanvas(): void {
   function redo(): void {
     const change = redoStack.pop();
     if (!change) return;
-    if (change.el.isConnected) change.el.textContent = change.after;
-    if (mode === 'autosave') {
-      writeSource(change.source, change.before, change.after).then((r) => {
-        if (!r.ok) toast(r.error || 'Redo failed', true);
-      });
-    } else {
-      if (!staged.has(change.el))
-        staged.set(change.el, { source: change.source, oldText: change.before });
-    }
+    applyChange(change, 'after');
     undoStack.push(change);
     refreshUI();
   }
@@ -412,6 +616,179 @@ whenBodyReady(function initNextCanvas(): void {
 
   refreshUI();
 
+  // ---- style panel ---------------------------------------------------------
+
+  function rowHtml(c: StyleControl): string {
+    const head = `<div class="nc-row" data-prop="${c.property}"><label>${c.label}</label><div class="nc-ctl">`;
+    const clear = `<button class="nc-clear" data-role="clear" title="Remove inline value">×</button>`;
+    if (c.kind === 'color') {
+      return (
+        head +
+        `<input type="color" class="nc-swatch" data-role="swatch">` +
+        `<input type="text" class="nc-hex" data-role="hex" spellcheck="false" placeholder="—">` +
+        clear +
+        `</div></div>`
+      );
+    }
+    if (c.kind === 'weight') {
+      return (
+        head +
+        `<select class="nc-len" data-role="weight">` +
+        ['', '300', '400', '500', '600', '700']
+          .map(
+            (v) =>
+              `<option value="${v}">${
+                v === ''
+                  ? '—'
+                  : { '300': 'Light', '400': 'Normal', '500': 'Medium', '600': 'Semibold', '700': 'Bold' }[
+                      v
+                    ] +
+                    ' ' +
+                    v
+              }</option>`
+          )
+          .join('') +
+        `</select>` +
+        `</div></div>`
+      );
+    }
+    if (c.kind === 'align') {
+      return (
+        head +
+        `<div class="nc-seg" data-role="align">` +
+        [
+          ['left', 'L'],
+          ['center', 'C'],
+          ['right', 'R'],
+          ['justify', 'J'],
+        ]
+          .map(([v, t]) => `<button data-val="${v}" title="${v}">${t}</button>`)
+          .join('') +
+        `</div></div></div>`
+      );
+    }
+    // length
+    return (
+      head +
+      `<input type="text" class="nc-len" data-role="len" spellcheck="false" placeholder="—">` +
+      clear +
+      `</div></div>`
+    );
+  }
+
+  const panel = document.createElement('div');
+  panel.className = 'nc-panel';
+  panel.setAttribute('data-nextcanvas-ui', '');
+  panel.style.display = 'none';
+  panel.innerHTML =
+    `<div class="nc-panel-head"><span class="nc-panel-title">◆ Style <span class="nc-panel-tag"></span></span>` +
+    `<button class="nc-btn" data-role="close" title="Deselect (Esc)">✕</button></div>` +
+    `<div class="nc-panel-body">${STYLE_CONTROLS.map(rowHtml).join('')}</div>`;
+  document.body.appendChild(panel);
+  const panelTag = panel.querySelector('.nc-panel-tag') as HTMLElement;
+
+  function rowFor(property: string): HTMLElement | null {
+    return panel.querySelector(`.nc-row[data-prop="${property}"]`);
+  }
+
+  // Fill every control from the selected element's *computed* style, so a value
+  // coming from a CSS class (not an inline style) is still shown and editable.
+  function populatePanel(): void {
+    if (!selected) return;
+    const cs = getComputedStyle(selected);
+    for (const c of STYLE_CONTROLS) {
+      const row = rowFor(c.property);
+      if (!row) continue;
+      const raw = cs.getPropertyValue(
+        c.property.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())
+      );
+      if (c.kind === 'color') {
+        const swatch = row.querySelector('[data-role="swatch"]') as HTMLInputElement;
+        const hex = row.querySelector('[data-role="hex"]') as HTMLInputElement;
+        const transparent = c.property === 'backgroundColor' && isTransparent(raw);
+        swatch.value = rgbToHex(raw);
+        hex.value = transparent ? '' : rgbToHex(raw);
+      } else if (c.kind === 'weight') {
+        const sel = row.querySelector('[data-role="weight"]') as HTMLSelectElement;
+        sel.value = ['300', '400', '500', '600', '700'].includes(raw) ? raw : '';
+      } else if (c.kind === 'align') {
+        const norm = raw === 'start' ? 'left' : raw === 'end' ? 'right' : raw;
+        row.querySelectorAll('[data-val]').forEach((b) =>
+          b.classList.toggle('nc-on', b.getAttribute('data-val') === norm)
+        );
+      } else {
+        const len = row.querySelector('[data-role="len"]') as HTMLInputElement;
+        len.value = raw;
+      }
+    }
+  }
+
+  function applyControl(property: string, value: string): void {
+    if (!selected) return;
+    const source = getSource(selected);
+    if (!source) {
+      toast('Lost source info for this element', true);
+      return;
+    }
+    const before = (selected.style as unknown as Record<string, string>)[property] || '';
+    commitStyle(selected, source, property, before, value || '');
+    populatePanel();
+  }
+
+  function selectEl(el: HTMLElement): void {
+    selected = el;
+    panelTag.textContent = '<' + el.tagName.toLowerCase() + '>';
+    panel.style.display = 'block';
+    populatePanel();
+    drawSelOutline();
+  }
+
+  function deselect(): void {
+    if (!selected) return;
+    selected = null;
+    panel.style.display = 'none';
+    selOutline.style.display = 'none';
+  }
+
+  // Commit on `change` (fires when the color picker closes or a field blurs),
+  // not on every `input`, so dragging the picker doesn't flood the undo stack.
+  panel.addEventListener('change', (e) => {
+    const t = e.target as HTMLElement;
+    const row = t.closest('.nc-row');
+    const property = row?.getAttribute('data-prop');
+    const role = t.getAttribute('data-role');
+    if (!property) return;
+    if (role === 'swatch') applyControl(property, (t as HTMLInputElement).value);
+    else if (role === 'hex') applyControl(property, (t as HTMLInputElement).value.trim());
+    else if (role === 'len') applyControl(property, (t as HTMLInputElement).value.trim());
+    else if (role === 'weight') applyControl(property, (t as HTMLSelectElement).value);
+  });
+
+  // Enter commits a text field without waiting for blur.
+  panel.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+  });
+
+  panel.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-role="close"]')) {
+      deselect();
+      return;
+    }
+    const alignBtn = t.closest('.nc-seg [data-val]');
+    if (alignBtn) {
+      const property = alignBtn.closest('.nc-row')?.getAttribute('data-prop');
+      if (property) applyControl(property, alignBtn.getAttribute('data-val') || '');
+      return;
+    }
+    const clearBtn = t.closest('[data-role="clear"]');
+    if (clearBtn) {
+      const property = clearBtn.closest('.nc-row')?.getAttribute('data-prop');
+      if (property) applyControl(property, '');
+      return;
+    }
+  });
+
   // ---- interaction ---------------------------------------------------------
 
   document.addEventListener(
@@ -429,7 +806,30 @@ whenBodyReady(function initNextCanvas(): void {
     true
   );
 
-  document.addEventListener('scroll', hideOutline, true);
+  document.addEventListener(
+    'scroll',
+    () => {
+      hideOutline();
+      drawSelOutline();
+    },
+    true
+  );
+  window.addEventListener('resize', drawSelOutline);
+
+  // Single-click selects a stamped element for styling (double-click still
+  // enters text editing; the two coexist — selecting is harmless). Clicking
+  // empty space or a non-stamped element deselects.
+  document.addEventListener(
+    'click',
+    (e) => {
+      const el = e.target;
+      if (inUI(el)) return;
+      if (el instanceof HTMLElement && el.isContentEditable) return;
+      if (isStylableEl(el)) selectEl(el);
+      else deselect();
+    },
+    true
+  );
 
   document.addEventListener(
     'dblclick',
@@ -487,6 +887,10 @@ whenBodyReady(function initNextCanvas(): void {
     (e) => {
       const active = document.activeElement;
       if (active instanceof HTMLElement && active.isContentEditable) return;
+      if (e.key === 'Escape' && selected && !inUI(active)) {
+        deselect();
+        return;
+      }
       if (!(e.ctrlKey || e.metaKey)) return;
       const k = e.key.toLowerCase();
       if (k === 'z' && !e.shiftKey) {

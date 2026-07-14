@@ -260,6 +260,38 @@ pulling, run `npm install` (or `npm run build`) inside `nextcanvas/` to rebuild
 
 ## Current scope
 
-Static JSX text only (`<h1>Hello</h1>`). Bound values (`<h1>{title}</h1>`) and
-mixed-children elements are rejected. Repeated components sharing one source line
-(via `.map`) edit the shared source, affecting all instances.
+**Text editing:** Static JSX text only (`<h1>Hello</h1>`). Bound values
+(`<h1>{title}</h1>`) and mixed-children elements are rejected. Repeated
+components sharing one source line (via `.map`) edit the shared source, affecting
+all instances.
+
+**Style editing:** Single-click selects any stamped element and opens the style
+panel (color / background / font-size / font-weight / text-align / padding),
+which rewrites the element's inline `style={{...}}` via `applyStyleEdit` in
+`src/server.ts` (`POST /style`). Inline style only — no Tailwind/className
+rewriting yet (the `applyStyleEdit` locate-then-set/remove contract is the seam a
+Tailwind-class layer would plug into). Only a literal `style={{...}}` object is
+editable; `style={someVar}` is rejected.
+
+### TODO — wire style edits into Manual-mode staging
+
+Style edits currently **always autosave** (write to source on every control
+change), regardless of the Autosave/Manual toolbar mode — they do ride the shared
+undo/redo stack, but they bypass the `staged` map that Manual mode uses to batch
+text edits behind the Save button. So in Manual mode, text changes stage while
+style changes still write immediately, which is inconsistent.
+
+To fix: extend the Manual-mode staging path (`staged` in `src/overlay.ts`, plus
+`save()`) to also hold pending style changes so a `<h1>` re-color waits for Save
+just like a text edit. Sketch:
+- Stage a per-(element, property) pending style change keyed alongside the
+  existing text staging (the current `staged` map is keyed by element with a
+  single `oldText`; styles need per-property before/after, so likely a second
+  map or a richer staged value).
+- `commitStyle` should branch on `mode` like `commit` does: autosave → write
+  now; manual → stage + toast "Staged", and count toward `stagedDirtyCount()` /
+  the Save badge.
+- `save()` must flush staged style changes through `writeStyle` (currently it
+  only iterates text edits), and `setMode('autosave')` must flush them too.
+- Decide undo/redo interaction with staging (today style undo always writes;
+  once staged, undo of an unsaved style change should just un-stage).
