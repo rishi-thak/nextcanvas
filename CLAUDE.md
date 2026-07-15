@@ -152,12 +152,18 @@ Pieces:
   at compile time. Because it runs *inside* SWC, it works under both the webpack
   (next-swc) and Turbopack pipelines — unlike a Babel plugin, which opts Next out
   of SWC. Injected via `experimental.swcPlugins` by `withCanvas` (no `.babelrc`).
+  Also stamps `data-nc-text-bound="member.chain"` on an element whose only child
+  is a `{member.chain}` (bound text — see Current scope), so the server can
+  rewrite the backing data object.
 - **`src/overlay.ts`** — vanilla-DOM client (no React). Highlights text elements,
   makes them `contentEditable` on double-click, reads `data-loc` off the DOM, and
   POSTs `{fileName, lineNumber, oldText, newText}` to the server on commit.
 - **`src/server.ts`** — dev-only HTTP server on :3131. `applyEdit()` uses
   `ts-morph` to do a formatting-preserving edit of the JSX text node, then
-  `saveSync()`. Also serves the compiled `overlay.js` raw at `/overlay.js`.
+  `saveSync()`; `applyBoundTextEdit()` handles bound text (`{member.chain}`) by
+  resolving the binding to a data object (following relative imports) and
+  rewriting the string property. Also serves the compiled `overlay.js` raw at
+  `/overlay.js`.
 - **`src/next.ts`** (`withCanvas`) — wraps the user's Next config; in dev it
   boots the server AND injects the SWC plugin into `experimental.swcPlugins`.
   **`src/index.ts`** exports `<NextCanvasOverlay/>`, which injects a
@@ -306,11 +312,10 @@ using the stock demo `next.config.js`.
 - **Turbopack-on-Windows** is unverified and may still fail for a *different*
   upstream reason (wasm host-imports gap, vercel/next.js#84972). Keep `--webpack`
   on Windows until verified.
-- **The demo still forces `--webpack`** (`demo/package.json` `dev` script) and
-  currently installs the **published** `@rishi-thak/nextcanvas` (not `file:`),
-  which predates this fix. To exercise Turbopack against the fixed package,
-  point the demo at `file:../nextcanvas` (rebuild `dist/` first) or publish a new
-  version, then flip `dev` to `next dev` / `--turbo`.
+- **The demo still forces `--webpack`** (`demo/package.json` `dev` script). It
+  consumes the package via `file:../nextcanvas`, so rebuild `dist/` (and the wasm
+  if the plugin changed) before it picks up source changes. To exercise Turbopack
+  against the fixed package, flip `dev` to `next dev` / `--turbo`.
 
 **Rebuild reminder:** `dist/` and `swc-plugin/target/` are gitignored. After
 pulling, run `npm install` (or `npm run build`) inside `nextcanvas/` to rebuild
@@ -324,10 +329,26 @@ Three edit kinds, all dev-only and written back through the :3131 server.
 **Text editing.** Static JSX text (`<h1>Hello</h1>`) **and** text mixed with
 inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
 surrounding text runs are editable and the inline elements are locked +
-preserved. Bound values (`<h1>{title}</h1>`) — any element with a direct
-`{expression}` child — are left unstamped and not editable. Repeated components
-sharing one source line (via `.map`) edit the shared source, affecting all
-instances.
+preserved. Repeated components sharing one source line (via `.map`) edit the
+shared source, affecting all instances.
+
+**Bound text.** An element whose *only* child is a `{member.chain}` —
+`<h3>{speaker.name}</h3>`, `<h1>{cfg.title}</h1>` — is also editable: the value
+lives as a string property on a data object, not as literal JSX text, so the
+plugin stamps `data-nc-text-bound="speaker.name"` (alongside `data-loc`) and the
+server rewrites the underlying object via `applyBoundTextEdit` (`POST /edit` with
+`textBound` + `expr` + `index`). It resolves the binding two ways: a
+`<collection>.map(...)` callback param → the collection's array literal, element
+`[index]`; or a direct object variable (`cfg`). **Targeting is positional** — the
+overlay sends the `.map` iteration index (its position among elements sharing the
+exact `data-loc`) so duplicate/empty values still resolve — **guarded by value**:
+the resolved property must still equal the edited text, else the edit is rejected
+as stale. The collection/object declaration may be **imported from another
+module** (resolved relatively, with `.ts/.tsx/.js/.jsx`/`index.*` fallbacks); the
+edit is written back to whichever file *owns* the declaration (often a data
+module, not the JSX file) — Fast Refresh still reflects it. Only a member chain
+of plain identifiers is stamped: a bare `{title}`, `{items[i].x}`, `{fn().y}`, or
+text mixed with an expression (`Hi {name}`) stays unstamped and not editable.
 
 **Attribute editing.** Whitelisted JSX attributes (`src`, `href`, `alt`,
 `title`, `placeholder`, `aria-label`) via a hover chip + attribute panel, in two

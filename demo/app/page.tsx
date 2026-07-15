@@ -1,3 +1,5 @@
+import { SPEAKERS, siteConfig } from './speakers';
+
 const GITHUB = 'https://github.com/rishi-thak/nextcanvas';
 
 function CodeWindow({
@@ -247,6 +249,23 @@ export default function Home() {
                 React internals. It just keeps working.
               </p>
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ---------------- Speakers (bound-text demo) ---------------- */}
+      <section id="speakers">
+        <div className="container">
+          {/* direct-object binding: {siteConfig.title} */}
+          <h2 className="section-title">{siteConfig.title}</h2>
+          <div className="cards">
+            {SPEAKERS.map((s, i) => (
+              <div className="card" key={i}>
+                {/* .map bindings — editable, written back into speakers.ts */}
+                <h3>{s.name}</h3>
+                <p>{s.bio}</p>
+              </div>
+            ))}
           </div>
         </div>
       </section>

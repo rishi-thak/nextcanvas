@@ -10,11 +10,18 @@
 //!     `<a href="/x">…</a>`; editable attribute value).
 //!
 //! An element with a **direct `{expression}` child** (a bound value) is left
-//! unstamped for text purposes: its text-node layout is ambiguous, so the
-//! overlay won't offer to edit something whose commit would just bounce.
-//! (Expressions nested *inside* a child element are fine — the child is
-//! preserved verbatim.) Such an element is still stamped if it has an editable
-//! attribute. Editable attributes are emitted to the browser split by kind:
+//! unstamped for text purposes *unless* that is its only child and the
+//! expression is a plain member-access chain (`{speaker.name}`, `{cfg.title}`),
+//! in which case it is stamped as **bound text**: `data-loc` plus
+//! `data-nc-text-bound="speaker.name"`. The overlay then edits the rendered
+//! value and the write-back server rewrites the underlying data object's string
+//! property (see `applyBoundTextEdit`). Anything more complex than a member
+//! chain of identifiers (a bare `{title}`, `{items[i].x}`, `{fn().y}`, or text
+//! mixed with an expression) stays unstamped — its write-back target is
+//! ambiguous. (Expressions nested *inside* a child element are fine — the child
+//! is preserved verbatim.) Such an element is still stamped if it has an
+//! editable attribute. Editable attributes are emitted to the browser split by
+//! kind:
 //!   - `data-nc-attrs` — string-literal attrs (`href="/x"`), edited in place.
 //!   - `data-nc-bound` — bound simple-identifier attrs (`href={GITHUB}`), where
 //!     the overlay asks whether to rewrite the shared variable (all references)
@@ -29,7 +36,7 @@
 use swc_core::common::{SourceMapper, DUMMY_SP};
 use swc_core::ecma::ast::{
     Expr, IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXElement,
-    JSXElementChild, JSXElementName, JSXExpr, Program, Str,
+    JSXElementChild, JSXElementName, JSXExpr, MemberProp, Program, Str,
 };
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 use swc_core::plugin::metadata::TransformPluginMetadataContextKind;
@@ -64,6 +71,61 @@ fn has_editable_text(children: &[JSXElementChild]) -> bool {
         }
     }
     has_text
+}
+
+/// A member-access chain of plain identifiers, rendered as a dotted path.
+/// `speaker.name` → `Some("speaker.name")`; `a.b.c` → `Some("a.b.c")`. Returns
+/// `None` for anything else in the chain (computed `a[b]`, a call `fn()`, an
+/// optional-chain link, a private field), so only expressions the write-back
+/// server can resolve to one data-object property are stamped.
+fn member_path(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(id) => Some(id.sym.to_string()),
+        Expr::Member(m) => {
+            let obj = member_path(&m.obj)?;
+            let prop = match &m.prop {
+                MemberProp::Ident(id) => id.sym.to_string(),
+                _ => return None,
+            };
+            Some(format!("{}.{}", obj, prop))
+        }
+        _ => None,
+    }
+}
+
+/// When the element's only non-whitespace child is a single `{member.chain}`
+/// expression (`<h3>{speaker.name}</h3>`, `<h1>{cfg.title}</h1>`), return that
+/// chain as a dotted path — this is **bound text**. A bare `{title}` (no dot),
+/// text mixed with an expression (`Hi {name}`), a nested element, or anything
+/// the member chain can't express (`{items[i].x}`, `{fn().y}`) disqualifies the
+/// element and it stays unstamped, exactly as before.
+fn editable_bound_text_expr(children: &[JSXElementChild]) -> Option<String> {
+    let mut found: Option<String> = None;
+    for child in children {
+        match child {
+            JSXElementChild::JSXText(t) => {
+                if !t.value.trim().is_empty() {
+                    return None; // static text mixed with an expression
+                }
+            }
+            JSXElementChild::JSXExprContainer(c) => {
+                if found.is_some() {
+                    return None; // more than one expression child
+                }
+                match &c.expr {
+                    // Require a member chain (at least one dot); a bare
+                    // identifier is out of scope for this version.
+                    JSXExpr::Expr(e) if matches!(&**e, Expr::Member(_)) => {
+                        found = Some(member_path(e)?);
+                    }
+                    _ => return None,
+                }
+            }
+            // Nested elements / fragments / spreads make this not pure bound text.
+            _ => return None,
+        }
+    }
+    found
 }
 
 /// Attributes the write-back server can rewrite (each must be a plain string
@@ -160,11 +222,17 @@ impl VisitMut for DataLocStamper {
         }
 
         // Only stamp what the overlay can actually edit: an editable text run
-        // (see has_editable_text) OR ≥1 editable string-literal attribute OR
-        // ≥1 editable bound-identifier attribute (href={VAR}).
+        // (see has_editable_text) OR bound text (a single {member.chain} child)
+        // OR ≥1 editable string-literal attribute OR ≥1 editable bound-identifier
+        // attribute (href={VAR}).
         let attr_names = editable_string_attrs(&node.opening.attrs);
         let bound_names = editable_bound_attrs(&node.opening.attrs);
-        if !has_editable_text(&node.children) && attr_names.is_empty() && bound_names.is_empty() {
+        let bound_text = editable_bound_text_expr(&node.children);
+        if !has_editable_text(&node.children)
+            && bound_text.is_none()
+            && attr_names.is_empty()
+            && bound_names.is_empty()
+        {
             return;
         }
         if already_stamped(&node.opening.attrs) {
@@ -196,6 +264,21 @@ impl VisitMut for DataLocStamper {
                 value: Some(JSXAttrValue::Str(Str {
                     span: DUMMY_SP,
                     value: attr_names.join(" ").into(),
+                    raw: None,
+                })),
+            }));
+        }
+
+        // Bound text (`<h3>{speaker.name}</h3>`) — the overlay edits the rendered
+        // value and the server rewrites the data object's string property. The
+        // dotted path tells the server which property (`speaker.name` → `name`).
+        if let Some(path) = bound_text {
+            node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                span: DUMMY_SP,
+                name: JSXAttrName::Ident(IdentName::new("data-nc-text-bound".into(), DUMMY_SP)),
+                value: Some(JSXAttrValue::Str(Str {
+                    span: DUMMY_SP,
+                    value: path.into(),
                     raw: None,
                 })),
             }));
