@@ -424,26 +424,25 @@ function resolveModuleFile(
 
 /**
  * Edit bound TEXT — an element whose child is a `{member.chain}` (`{speaker.name}`,
- * `{cfg.title}`), stamped by the plugin as `data-nc-text-bound`. The rendered
- * value lives as a string property on a data object, so we resolve the binding
- * back to that object and rewrite the property.
+ * `{cfg.title}`), a `{a ?? b}` / `{a || b}` of those shapes, or a bare `{ident}`
+ * (`.map` element or capitalized-component prop), stamped as `data-nc-text-bound`.
  *
  * Resolution walks the JSX ancestors of the stamped element:
- *   - `.map` binding: a callback whose parameter is the base identifier, called
- *     as `<collection>.map(...)`. The collection variable → its array literal →
- *     the element whose bound property equals `oldText` (see targeting below).
- *   - direct-object binding (`cfg.title`): the base identifier resolves straight
- *     to a variable whose initializer is an object literal.
- * Either declaration may be **imported** from another module, which we resolve
- * and add to the project; the property is rewritten and that owning file saved
- * (Fast Refresh still reflects it — the data module is in the graph).
+ *   - `.map` binding: callback param (plain or destructured) → collection array →
+ *     value-matched entry (see targeting below).
+ *   - **prop drill**: base is a param of a capitalized component (`Row({ q })`,
+ *     `SessionCard({ session })`) → find `<Row q={f.q} />` / `<SessionCard
+ *     session={session} />` call sites and continue resolving from the prop
+ *     value (unlocks FAQ / Agenda SessionCard without inlining the JSX).
+ *   - direct-object binding (`cfg.title`): base → object literal.
+ * Either declaration may be **imported** from another module.
  *
- * Targeting is by VALUE, not position: among the array's entries we pick the one
- * whose bound property currently equals `oldText`. The rendered `.map` output is
- * routinely filtered/reordered (pinned-first, track filters), so DOM position
- * doesn't track array index. A unique value edits cleanly; a value shared by
- * several entries is genuinely ambiguous and is refused rather than mis-targeted;
- * no match means the source moved on and the edit is rejected as stale.
+ * When a mapped collection isn't a direct array literal (`visible` from
+ * `useMemo` over `AGENDA`), value-match falls back across local/imported object
+ * arrays that have the bound property — unique match wins.
+ *
+ * Targeting is by VALUE, not position. A unique value edits cleanly; a shared
+ * value is refused; no match ⇒ stale.
  */
 export function applyBoundTextEdit(edit: Edit): EditResult {
   const { Project, SyntaxKind, Node } =
@@ -453,19 +452,17 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
   if (!fileName) return { ok: false, error: 'missing fileName' };
   if (!expr) return { ok: false, error: 'missing expr' };
 
-  const parts = String(expr).split('.');
-  const base = parts[0];
-  const propPath = parts.slice(1);
-  if (!base) {
+  // `{s.name ?? s.role}` / `{a || b}` — try each operand; the DOM shows one side.
+  const candidates = String(expr)
+    .split(/\?\?|\|\|/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (candidates.length === 0) {
     return {
       ok: false,
       error: `Bound-text expression "${expr}" has no base identifier.`,
     };
   }
-  // Two stamped shapes reach here: a `{member.chain}` (propPath has ≥1 segment,
-  // e.g. `speaker.name`) that resolves to a string property of an object, and a
-  // bare `{identifier}` (propPath empty, e.g. `t`) that is a `.map` element over
-  // an array of string literals. Both are value-matched below.
 
   const project = new Project({
     compilerOptions: { allowJs: true, jsx: 4 /* preserve */ },
@@ -473,8 +470,6 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
   });
   const sourceFile = project.addSourceFileAtPath(fileName);
 
-  // Locate the stamped opening element at lineNumber (+column to disambiguate
-  // several elements sharing a line), same as applyStyleEdit.
   const opens = [
     ...sourceFile.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
     ...sourceFile.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
@@ -498,41 +493,21 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
       .sort((a, b) => a.d - b.d)[0].n;
   }
 
-  // Resolve `base` to the data it renders. `.map`/`.flatMap` binding if base is a
-  // callback parameter of a `<collection>.map(...)` call — the collection is
-  // either a named variable (collectionName) or an inline array literal
-  // (collectionArray). Otherwise it's a direct-object binding (`cfg.title`).
-  let collectionName: string | undefined;
-  let collectionArray: import('ts-morph').ArrayLiteralExpression | undefined;
-  for (const anc of opening.getAncestors()) {
-    if (!Node.isArrowFunction(anc) && !Node.isFunctionExpression(anc)) continue;
-    const hasParam = anc.getParameters().some((p) => {
-      const nn = p.getNameNode();
-      return Node.isIdentifier(nn) && nn.getText() === base;
-    });
-    if (!hasParam) continue;
-    const call = anc.getParent();
-    if (call && Node.isCallExpression(call)) {
-      const callee = call.getExpression();
-      if (
-        Node.isPropertyAccessExpression(callee) &&
-        (callee.getName() === 'map' || callee.getName() === 'flatMap')
-      ) {
-        const objExpr = callee.getExpression();
-        if (Node.isIdentifier(objExpr)) collectionName = objExpr.getText();
-        else if (Node.isArrayLiteralExpression(objExpr)) collectionArray = objExpr;
-      }
-    }
-    break; // the nearest binding of `base` wins, map or not
-  }
+  type MorphNode = import('ts-morph').Node;
+  type MorphExpr = import('ts-morph').Expression;
+  type MorphArray = import('ts-morph').ArrayLiteralExpression;
+  type MorphObject = import('ts-morph').ObjectLiteralExpression;
+  type MorphString = import('ts-morph').StringLiteral;
+  type MorphSourceFile = import('ts-morph').SourceFile;
 
-  // Resolve a variable's initializer, following a relative import if needed.
   const resolveInitializer = (
-    name: string
-  ): { init?: import('ts-morph').Expression; where: string } => {
-    const local = sourceFile.getVariableDeclaration(name);
-    if (local) return { init: local.getInitializer(), where: 'local' };
-    for (const imp of sourceFile.getImportDeclarations()) {
+    name: string,
+    from: MorphSourceFile
+  ): { init?: MorphExpr; where: string; file: MorphSourceFile } => {
+    const local = from.getVariableDeclaration(name);
+    if (local)
+      return { init: local.getInitializer(), where: 'local', file: from };
+    for (const imp of from.getImportDeclarations()) {
       const named = imp
         .getNamedImports()
         .find((ni) => (ni.getAliasNode()?.getText() ?? ni.getName()) === name);
@@ -540,74 +515,138 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
       if (!named && !isDefault) continue;
       const spec = imp.getModuleSpecifierValue();
       const dataFile =
-        resolveModuleFile(spec, fileName, project) ??
+        resolveModuleFile(spec, from.getFilePath(), project) ??
         imp.getModuleSpecifierSourceFile();
       if (!dataFile) {
         return {
           init: undefined,
           where: `unresolved import "${spec}"`,
+          file: from,
         };
       }
       const exportName = named ? named.getName() : name;
       const decl = dataFile.getVariableDeclaration(exportName);
-      return { init: decl?.getInitializer(), where: dataFile.getFilePath() };
+      return {
+        init: decl?.getInitializer(),
+        where: dataFile.getFilePath(),
+        file: dataFile,
+      };
     }
-    return { init: undefined, where: 'not found' };
+    return { init: undefined, where: 'not found', file: from };
   };
 
-  // Walk propPath into an object literal down to the leaf string-literal
-  // property. Returns the StringLiteral node, or an error describing what broke.
-  const leafOf = (
-    root: import('ts-morph').ObjectLiteralExpression
-  ): { leaf?: import('ts-morph').StringLiteral; err?: string } => {
+  /** Does this parameter bind `name` (plain ident or `{ name }` destructure)? */
+  const paramBindsName = (
+    fn: import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression,
+    name: string
+  ): boolean => {
+    for (const p of fn.getParameters()) {
+      const nn = p.getNameNode();
+      if (Node.isIdentifier(nn) && nn.getText() === name) return true;
+      if (Node.isObjectBindingPattern(nn)) {
+        for (const el of nn.getElements()) {
+          // `{ session }` or `{ session: s }` — binding name is what JSX uses.
+          if (el.getName() === name) return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  /** Component display name for a function decl / const arrow, if capitalized. */
+  const componentNameOf = (
+    fn: import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression
+  ): string | undefined => {
+    const parent = fn.getParent();
+    if (Node.isFunctionDeclaration(fn as never)) {
+      // unreachable — FunctionDeclaration isn't Arrow/FunctionExpression
+    }
+    if (Node.isVariableDeclaration(parent)) {
+      const n = parent.getName();
+      if (/^[A-Z]/.test(n)) return n;
+    }
+    // function expression with inner name, or FunctionDeclaration via ancestors
+    for (const a of fn.getAncestors()) {
+      if (Node.isFunctionDeclaration(a)) {
+        const n = a.getName();
+        if (n && /^[A-Z]/.test(n)) return n;
+        return undefined;
+      }
+      if (Node.isVariableDeclaration(a)) {
+        const n = a.getName();
+        if (/^[A-Z]/.test(n)) return n;
+        return undefined;
+      }
+    }
+    return undefined;
+  };
+
+  /** Also handle `function Row(...)` which is a FunctionDeclaration, not expr. */
+  const functionDeclName = (
+    node: MorphNode
+  ): { name: string; fn: import('ts-morph').FunctionDeclaration } | undefined => {
+    if (Node.isFunctionDeclaration(node)) {
+      const n = node.getName();
+      if (n && /^[A-Z]/.test(n)) return { name: n, fn: node };
+    }
+    return undefined;
+  };
+
+  const paramBindsOnDecl = (
+    fn: import('ts-morph').FunctionDeclaration,
+    name: string
+  ): boolean => {
+    for (const p of fn.getParameters()) {
+      const nn = p.getNameNode();
+      if (Node.isIdentifier(nn) && nn.getText() === name) return true;
+      if (Node.isObjectBindingPattern(nn)) {
+        for (const el of nn.getElements()) {
+          if (el.getName() === name) return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  const leafOfPath = (
+    root: MorphObject,
+    propPath: string[],
+    label: string
+  ): { leaf?: MorphString; err?: string } => {
+    if (propPath.length === 0) {
+      return { err: `"${label}": empty property path.` };
+    }
     let obj = root;
     for (let i = 0; i < propPath.length - 1; i++) {
       const p = obj.getProperty(propPath[i]);
       if (!p || !Node.isPropertyAssignment(p))
-        return { err: `"${expr}": no property "${propPath[i]}".` };
+        return { err: `"${label}": no property "${propPath[i]}".` };
       const v = p.getInitializer();
       if (!v || !Node.isObjectLiteralExpression(v))
-        return { err: `"${expr}": "${propPath[i]}" is not a nested object.` };
+        return { err: `"${label}": "${propPath[i]}" is not a nested object.` };
       obj = v;
     }
     const leafName = propPath[propPath.length - 1];
     const la = obj.getProperty(leafName);
     if (!la || !Node.isPropertyAssignment(la))
-      return { err: `"${expr}": no property "${leafName}".` };
+      return { err: `"${label}": no property "${leafName}".` };
     const li = la.getInitializer();
     if (!li || !Node.isStringLiteral(li))
       return {
-        err: `"${expr}": "${leafName}" is not a string literal, so it can't be edited.`,
+        err: `"${label}": "${leafName}" is not a string literal, so it can't be edited.`,
       };
     return { leaf: li };
   };
 
-  let leafInit: import('ts-morph').StringLiteral;
-  if (collectionName || collectionArray) {
-    let arr: import('ts-morph').ArrayLiteralExpression;
-    if (collectionArray) {
-      arr = collectionArray;
-    } else {
-      const { init, where } = resolveInitializer(collectionName!);
-      if (!init || !Node.isArrayLiteralExpression(init)) {
-        return {
-          ok: false,
-          error: `Could not resolve "${collectionName}" to an array literal (${where}). Bound-text edits need a local or relatively-imported \`const ${collectionName} = [ … ]\`.`,
-        };
-      }
-      arr = init;
-    }
-    const label = collectionName ?? 'the mapped array';
-    // Value-match targeting: pick the array entry whose bound value CURRENTLY
-    // equals the edited text — not a positional index. A `.map`'s rendered output
-    // is routinely filtered and reordered (e.g. pinned-first), so DOM position
-    // ≠ array index; matching by value edits the entry the user actually changed.
-    const matches: import('ts-morph').StringLiteral[] = [];
+  const valueMatchInArray = (
+    arr: MorphArray,
+    propPath: string[],
+    label: string
+  ): { matches: MorphString[]; leafErr?: string } => {
+    const matches: MorphString[] = [];
     let leafErr: string | undefined;
     for (const el of arr.getElements()) {
       if (propPath.length === 0) {
-        // Array-of-strings (a bare `{t}` from a `.map`): the element itself is
-        // the rendered string, so it is the leaf to match/rewrite.
         if (
           Node.isStringLiteral(el) &&
           el.getLiteralValue() === String(oldText)
@@ -617,70 +656,301 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
         continue;
       }
       if (!Node.isObjectLiteralExpression(el)) continue;
-      const { leaf, err } = leafOf(el);
+      const { leaf, err } = leafOfPath(el, propPath, label);
       if (err) {
         leafErr = err;
         continue;
       }
       if (leaf!.getLiteralValue() === String(oldText)) matches.push(leaf!);
     }
-    if (matches.length === 1) {
-      leafInit = matches[0];
-    } else if (matches.length > 1) {
-      // Same value on several entries (e.g. a repeated `track`). Positional
-      // disambiguation is unsafe here — DOM order isn't array order — so refuse
-      // rather than risk rewriting the wrong entry.
-      return {
-        ok: false,
-        error: `"${oldText}" appears ${matches.length}× in ${label}; nextcanvas can't tell which entry you meant. Make the value unique, or edit it directly in the data file.`,
-      };
-    } else {
-      return {
-        ok: false,
-        error:
-          leafErr ??
-          `No entry in ${label} currently ${
-            propPath.length ? `has ${propPath.join('.')} === ` : 'equals '
-          }"${oldText}"; reload and try again.`,
-      };
+    return { matches, leafErr };
+  };
+
+  /** Local + relatively-imported `const X = [ {…}, … ]` arrays. */
+  const allObjectArrays = (): { arr: MorphArray; label: string }[] => {
+    const out: { arr: MorphArray; label: string }[] = [];
+    const seen = new Set<string>();
+    const addFrom = (sf: MorphSourceFile) => {
+      for (const d of sf.getVariableDeclarations()) {
+        const init = d.getInitializer();
+        if (!init || !Node.isArrayLiteralExpression(init)) continue;
+        const key = sf.getFilePath() + '#' + d.getName();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ arr: init, label: d.getName() });
+      }
+    };
+    addFrom(sourceFile);
+    for (const imp of sourceFile.getImportDeclarations()) {
+      const spec = imp.getModuleSpecifierValue();
+      if (!spec.startsWith('.')) continue;
+      const dataFile =
+        resolveModuleFile(spec, fileName, project) ??
+        imp.getModuleSpecifierSourceFile();
+      if (dataFile) addFrom(dataFile);
     }
-  } else {
-    // Direct-object binding needs a member chain (`cfg.title`); a bare
-    // identifier with no `.map` binding has nothing resolvable to target.
+    return out;
+  };
+
+  type ResolveHit =
+    | { kind: 'array'; arr: MorphArray; propPath: string[]; label: string }
+    | {
+        kind: 'fallback';
+        propPath: string[];
+        /** Collection name that wasn't a direct array literal (e.g. `visible`). */
+        via: string;
+      }
+    | { kind: 'object'; obj: MorphObject; propPath: string[]; label: string }
+    | { kind: 'fail'; error: string };
+
+  /**
+   * Resolve one dotted path (`s.name`, `q`, `session.title`) starting from a
+   * JSX opening (or call-site opening after prop drill).
+   */
+  const resolvePath = (
+    fromOpening: MorphNode,
+    pathExpr: string,
+    depth: number
+  ): ResolveHit => {
+    if (depth > 8) {
+      return { kind: 'fail', error: `Bound-text prop-drill for "${pathExpr}" went too deep.` };
+    }
+    const parts = pathExpr.split('.').filter(Boolean);
+    const base = parts[0];
+    const propPath = parts.slice(1);
+    if (!base) {
+      return { kind: 'fail', error: `Bound-text expression "${pathExpr}" has no base.` };
+    }
+
+    // Walk ancestors for a binding of `base`.
+    for (const anc of fromOpening.getAncestors()) {
+      // `function Row({ q }) { … }`
+      const decl = functionDeclName(anc);
+      if (decl && paramBindsOnDecl(decl.fn, base)) {
+        // Prop of a component — find call sites and drill.
+        const drilled = drillProp(decl.name, base, propPath, fromOpening, depth);
+        if (drilled) return drilled;
+        return {
+          kind: 'fail',
+          error: `Found component prop "${base}" on ${decl.name} but no resolvable call-site binding.`,
+        };
+      }
+
+      if (!Node.isArrowFunction(anc) && !Node.isFunctionExpression(anc)) continue;
+      if (!paramBindsName(anc, base)) continue;
+
+      const call = anc.getParent();
+      if (call && Node.isCallExpression(call)) {
+        const callee = call.getExpression();
+        if (
+          Node.isPropertyAccessExpression(callee) &&
+          (callee.getName() === 'map' || callee.getName() === 'flatMap')
+        ) {
+          const objExpr = callee.getExpression();
+          if (Node.isArrayLiteralExpression(objExpr)) {
+            return {
+              kind: 'array',
+              arr: objExpr,
+              propPath,
+              label: 'the mapped array',
+            };
+          }
+          if (Node.isIdentifier(objExpr)) {
+            const cname = objExpr.getText();
+            const { init, where } = resolveInitializer(
+              cname,
+              fromOpening.getSourceFile()
+            );
+            if (init && Node.isArrayLiteralExpression(init)) {
+              return { kind: 'array', arr: init, propPath, label: cname };
+            }
+            // `visible` from useMemo / filter — fall back to value-match across
+            // known object arrays (AGENDA, SPEAKERS, …).
+            if (propPath.length > 0) {
+              return { kind: 'fallback', propPath, via: cname };
+            }
+            return {
+              kind: 'fail',
+              error: `Could not resolve "${cname}" to an array literal (${where}).`,
+            };
+          }
+        }
+      }
+
+      // Capitalized const/function component param — prop drill.
+      const cname = componentNameOf(anc);
+      if (cname) {
+        const drilled = drillProp(cname, base, propPath, fromOpening, depth);
+        if (drilled) return drilled;
+      }
+
+      // Nearest binding of base wasn't a map and wasn't a drillable component.
+      break;
+    }
+
+    // Direct-object binding (`cfg.title`).
     if (propPath.length === 0) {
       return {
-        ok: false,
-        error: `Bound-text expression "${expr}" is a bare identifier that isn't a mapped-array element; nextcanvas can't resolve it to an editable string.`,
+        kind: 'fail',
+        error: `Bound-text expression "${pathExpr}" is a bare identifier that isn't a mapped-array element or resolvable component prop.`,
       };
     }
-    const { init, where } = resolveInitializer(base);
+    const { init, where } = resolveInitializer(base, fromOpening.getSourceFile());
     if (!init || !Node.isObjectLiteralExpression(init)) {
       return {
-        ok: false,
-        error: `Could not resolve "${base}" to an object literal (${where}). Bound-text edits need a local or relatively-imported object or \`.map\` array.`,
+        kind: 'fail',
+        error: `Could not resolve "${base}" to an object literal (${where}).`,
       };
     }
-    const { leaf, err } = leafOf(init);
-    if (!leaf) return { ok: false, error: err! };
-    // Direct object has a single target; value-guard against a stale edit.
-    if (leaf.getLiteralValue() !== String(oldText)) {
+    return { kind: 'object', obj: init, propPath, label: base };
+  };
+
+  /**
+   * Find `<Comp prop={expr} />` usages and continue resolution from `expr`.
+   * `q={f.q}` → resolve `f.q`; `session={session}` → resolve `session` (+rest path)
+   * from the call site (where `session` is often a `.map` param).
+   */
+  const drillProp = (
+    compName: string,
+    propName: string,
+    restPath: string[],
+    _fromOpening: MorphNode,
+    depth: number
+  ): ResolveHit | undefined => {
+    const usages = sourceFile.getDescendantsOfKind(SyntaxKind.JsxOpeningElement)
+      .concat(
+        sourceFile.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement) as never
+      )
+      .filter((el) => {
+        const tag = el.getTagNameNode().getText();
+        return tag === compName;
+      });
+
+    for (const usage of usages) {
+      const attr = usage.getAttribute(propName);
+      if (!attr || !Node.isJsxAttribute(attr)) continue;
+      const init = attr.getInitializer();
+      if (!init) continue;
+
+      // `q={f.q}` or `q="literal"` — only expression containers are drillable.
+      if (Node.isJsxExpression(init)) {
+        const e = init.getExpression();
+        if (!e) continue;
+        if (Node.isIdentifier(e)) {
+          const next = [e.getText(), ...restPath].join('.');
+          return resolvePath(usage, next, depth + 1);
+        }
+        if (Node.isPropertyAccessExpression(e)) {
+          // Rebuild dotted path from the member expression + rest.
+          const segs: string[] = [];
+          let cur: MorphExpr = e;
+          while (Node.isPropertyAccessExpression(cur)) {
+            segs.unshift(cur.getName());
+            cur = cur.getExpression();
+          }
+          if (!Node.isIdentifier(cur)) continue;
+          segs.unshift(cur.getText());
+          const next = [...segs, ...restPath].join('.');
+          return resolvePath(usage, next, depth + 1);
+        }
+      }
+    }
+    return undefined;
+  };
+
+  // Try each `??` / `||` operand; collect unique matching leaves.
+  const allMatches: MorphString[] = [];
+  let lastErr: string | undefined;
+
+  for (const cand of candidates) {
+    const hit = resolvePath(opening, cand, 0);
+    if (hit.kind === 'fail') {
+      lastErr = hit.error;
+      continue;
+    }
+    if (hit.kind === 'object') {
+      const { leaf, err } = leafOfPath(hit.obj, hit.propPath, cand);
+      if (!leaf) {
+        lastErr = err;
+        continue;
+      }
+      if (leaf.getLiteralValue() === String(oldText)) allMatches.push(leaf);
+      else
+        lastErr = `Bound-text edit no longer matches the source ("${leaf.getLiteralValue()}" ≠ "${oldText}"); reload and try again.`;
+      continue;
+    }
+    if (hit.kind === 'fallback') {
+      const matches: MorphString[] = [];
+      let leafErr: string | undefined;
+      for (const { arr, label } of allObjectArrays()) {
+        const r = valueMatchInArray(arr, hit.propPath, label);
+        matches.push(...r.matches);
+        if (r.leafErr) leafErr = r.leafErr;
+      }
+      if (matches.length === 1) {
+        allMatches.push(matches[0]);
+      } else if (matches.length > 1) {
+        return {
+          ok: false,
+          error: `"${oldText}" appears ${matches.length}× across data arrays (via "${hit.via}"); nextcanvas can't tell which entry you meant. Make the value unique, or edit it directly in the data file.`,
+        };
+      } else {
+        lastErr =
+          leafErr ??
+          `No entry in data arrays (via "${hit.via}") currently has ${hit.propPath.join('.')} === "${oldText}"; reload and try again.`;
+      }
+      continue;
+    }
+    // hit.kind === 'array'
+    const { matches, leafErr } = valueMatchInArray(
+      hit.arr,
+      hit.propPath,
+      hit.label
+    );
+    if (matches.length === 1) {
+      allMatches.push(matches[0]);
+    } else if (matches.length > 1) {
       return {
         ok: false,
-        error: `Bound-text edit no longer matches the source ("${leaf.getLiteralValue()}" ≠ "${oldText}"); reload and try again.`,
+        error: `"${oldText}" appears ${matches.length}× in ${hit.label}; nextcanvas can't tell which entry you meant. Make the value unique, or edit it directly in the data file.`,
       };
+    } else {
+      lastErr =
+        leafErr ??
+        `No entry in ${hit.label} currently ${
+          hit.propPath.length
+            ? `has ${hit.propPath.join('.')} === `
+            : 'equals '
+        }"${oldText}"; reload and try again.`;
     }
-    leafInit = leaf;
   }
 
-  leafInit.setLiteralValue(String(newText));
-  const owning = leafInit.getSourceFile();
-  owning.saveSync();
+  // Deduplicate by node identity (same leaf found via two candidates).
+  const unique = [...new Set(allMatches)];
+  if (unique.length === 1) {
+    const leafInit = unique[0];
+    leafInit.setLiteralValue(String(newText));
+    const owning = leafInit.getSourceFile();
+    owning.saveSync();
+    return {
+      ok: true,
+      fileName: owning.getFilePath(),
+      lineNumber,
+      oldText: String(oldText),
+      newText,
+    };
+  }
+  if (unique.length > 1) {
+    return {
+      ok: false,
+      error: `"${oldText}" matched ${unique.length} different source locations for "${expr}"; make the value unique, or edit the data file.`,
+    };
+  }
   return {
-    ok: true,
-    fileName: owning.getFilePath(),
-    lineNumber,
-    oldText: String(oldText),
-    newText,
+    ok: false,
+    error:
+      lastErr ??
+      `Could not resolve bound-text expression "${expr}" to an editable string.`,
   };
 }
 

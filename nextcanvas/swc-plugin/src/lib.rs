@@ -1,55 +1,50 @@
 //! nextcanvas SWC plugin — the SWC-native source-location stamp.
 //!
 //! Stamps `data-loc="<absFile>:<line>:<col>"` onto JSX elements the write-back
-//! server can edit. Both host (lowercase) elements and plain-identifier
-//! components (capitalized, e.g. `<Reveal as="h2">…</Reveal>`) are stamped: a
-//! host element always renders the stamped DOM node, while a component exposes
-//! the stamp only if it forwards unknown props to its root element
-//! (`<Tag {...rest}>`) — a best-effort no-op otherwise. An element qualifies
-//! when it has ANY of:
+//! server can edit. Stampable tags:
+//!   - **host** (lowercase) elements — stamp lands on the DOM node directly
+//!   - **plain-identifier components** (capitalized, e.g. `<Reveal as="h2">`) —
+//!     for *text* / bound-text, children are wrapped in a stamped `<span>` so the
+//!     stamp reaches the DOM even when the component does not forward props
+//!     (Reveal, ConciergeTrigger, …). Attr stamps still go on the component
+//!     (best-effort; needs `{...rest}` forwarding).
+//!   - **member tags** (`motion.h1`, `motion.p`, …) — stamped in place; Motion
+//!     (and similar) forward unknown DOM attrs to the host element.
+//!
+//! An element qualifies when it has ANY of:
 //!   - one or more non-whitespace `JSXText` direct children (editable text),
 //!     whether plain (`<h1>Hello</h1>`) or mixed with inline child elements
-//!     (`<p>Hello <strong>world</strong>!</p>`, where the surrounding text runs
-//!     are editable and the inline elements are preserved), OR
+//!     (`<p>Hello <strong>world</strong>!</p>`), OR
 //!   - a single **bound-text** child — see below, OR
-//!   - at least one editable string-literal attribute (`<img src="/a.png"/>`,
-//!     `<a href="/x">…</a>`; editable attribute value).
+//!   - at least one editable string-literal / bound-identifier attribute.
 //!
 //! **Bound text.** An element whose *only* non-whitespace child is a single
-//! `{expression}` is normally left unstamped (its write-back target is
-//! ambiguous), with two exceptions that ARE stamped as `data-nc-text-bound`:
+//! `{expression}` is stamped as `data-nc-text-bound` when the expression is:
 //!   - a `{member.chain}` of plain identifiers (`{speaker.name}`, `{cfg.title}`)
-//!     — stamped `data-nc-text-bound="speaker.name"`; the server resolves the
-//!     base (a `.map` collection, or a direct object variable) and rewrites the
-//!     leaf string property.
-//!   - a bare `{identifier}` **that names the element parameter of an enclosing
-//!     `.map`/`.flatMap` callback** (`truths.map((t) => <p>{t}</p>)`) — stamped
-//!     `data-nc-text-bound="t"`; the server rewrites the mapped array's
-//!     string-literal element whose value matches the edited text. The
-//!     `.map`-param gate (a scope stack, `map_params`) is deliberate: a bare
-//!     `{ident}` that is a component prop (`<pre>{children}</pre>`) or an
-//!     arbitrary const is left unstamped — the server couldn't resolve it to one
-//!     editable string and the affordance would only bounce.
+//!   - a `{a ?? b}` / `{a || b}` of those same shapes (server value-matches each
+//!     side — covers `{s.name ?? s.role}`)
+//!   - a bare `{identifier}` that names either:
+//!       (1) the element parameter of an enclosing `.map`/`.flatMap` callback, or
+//!       (2) a parameter of an enclosing **capitalized** function/component
+//!           (`function Row({ q }) { … <span>{q}</span> }`) — the server
+//!           prop-drills to the call site (`q={f.q}` inside `faqs.map`)
 //! Anything more complex — computed `{items[i].x}`, a call `{fn().y}`, or text
-//! mixed with an expression (`Hi {name}`) — stays unstamped. (Expressions nested
-//! *inside* a child element are fine — the child is preserved verbatim.)
+//! mixed with an expression (`Hi {name}`) — stays unstamped.
 //!
-//! Editable attributes are emitted to the browser split by kind:
-//!   - `data-nc-attrs` — string-literal attrs (`href="/x"`), edited in place.
-//!   - `data-nc-bound` — bound simple-identifier attrs (`href={GITHUB}`), where
-//!     the overlay asks whether to rewrite the shared variable (all references)
-//!     or inline a literal for just this element.
-//! Splitting by kind means the overlay never mistakes a bound `href={x}` (a
-//! resolved URL in the DOM) for an editable literal.
+//! Editable attributes are emitted split by kind:
+//!   - `data-nc-attrs` — string-literal attrs (`href="/x"`)
+//!   - `data-nc-bound` — bound simple-identifier attrs (`href={GITHUB}`)
 //!
 //! Because it runs inside SWC, it works under **both** the webpack (next-swc)
 //! and Turbopack pipelines. Wired via `experimental.swcPlugins` (injected by
 //! `withCanvas`), dev-only.
 
-use swc_core::common::{SourceMapper, DUMMY_SP};
+use swc_core::common::{SyntaxContext, SourceMapper, DUMMY_SP};
 use swc_core::ecma::ast::{
-    CallExpr, Callee, Expr, IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue,
-    JSXElement, JSXElementChild, JSXElementName, JSXExpr, MemberProp, Param, Pat, Program, Str,
+    BinExpr, BinaryOp, CallExpr, Callee, Expr, FnDecl, FnExpr, Ident, IdentName, JSXAttr,
+    JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXClosingElement, JSXElement, JSXElementChild,
+    JSXElementName, JSXExpr, JSXMemberExpr, JSXObject, JSXOpeningElement, MemberProp, ObjectPatProp,
+    Param, Pat, Program, Str, VarDeclarator,
 };
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 use swc_core::plugin::metadata::TransformPluginMetadataContextKind;
@@ -61,16 +56,90 @@ struct DataLocStamper {
     source_map: PluginSourceMapProxy,
     /// Stack of identifier names currently bound as the *element* parameter of an
     /// enclosing `.map`/`.flatMap` callback (`truths.map((t, i) => …)` pushes
-    /// `t`). A sole bare `{ident}` text child is only stamped when its identifier
-    /// is on this stack — i.e. it's a mapped-array element the server can rewrite
-    /// by value. This deliberately excludes component props (`<pre>{children}</pre>`,
-    /// `<span>{file}</span>`) and arbitrary consts, which would only bounce.
+    /// `t`). A sole bare `{ident}` text child is stamped when its identifier is
+    /// on this stack — i.e. it's a mapped-array element the server can rewrite
+    /// by value.
     map_params: Vec<String>,
+    /// Stack of param-binding name sets for enclosing **capitalized** functions
+    /// (`function Row({ q, a })`, `const SessionCard = ({ session }) => …`).
+    /// Bare `{q}` / `{session.title}`'s base can resolve through prop-drill on
+    /// the server. Pushed as a flat list of binding names per scope.
+    component_params: Vec<Vec<String>>,
+}
+
+/// Names that are almost never editable source copy when used as bare `{ident}`
+/// props — leave them unstamped so the overlay doesn't offer a bouncing edit.
+const SKIP_BARE_PROPS: &[&str] = &[
+    "children",
+    "className",
+    "key",
+    "ref",
+    "props",
+    "style",
+    "dangerouslySetInnerHTML",
+];
+
+fn is_component_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
+}
+
+fn is_capitalized_tag(name: &JSXElementName) -> bool {
+    match name {
+        JSXElementName::Ident(id) => is_component_name(&id.sym),
+        _ => false,
+    }
+}
+
+/// Host (`div`), plain Ident component (`Reveal`), or one-level member tag
+/// (`motion.h1`). Nested members (`Foo.Bar.Baz`) and namespaced tags stay out.
+fn is_stampable_tag(name: &JSXElementName) -> bool {
+    match name {
+        JSXElementName::Ident(_) => true,
+        JSXElementName::JSXMemberExpr(JSXMemberExpr { obj, .. }) => {
+            matches!(obj, JSXObject::Ident(_))
+        }
+        JSXElementName::JSXNamespacedName(_) => false,
+    }
+}
+
+/// Binding names introduced by a pattern — plain `t`, or destructured `{ q, a }`
+/// / `{ session: s }` (value side).
+fn binding_names_from_pat(pat: &Pat) -> Vec<String> {
+    match pat {
+        Pat::Ident(b) => vec![b.id.sym.to_string()],
+        Pat::Object(obj) => obj
+            .props
+            .iter()
+            .flat_map(|p| match p {
+                ObjectPatProp::Assign(a) => vec![a.key.id.sym.to_string()],
+                ObjectPatProp::KeyValue(kv) => binding_names_from_pat(&kv.value),
+                ObjectPatProp::Rest(_) => vec![],
+            })
+            .collect(),
+        Pat::Assign(a) => binding_names_from_pat(&a.left),
+        _ => vec![],
+    }
+}
+
+fn binding_names_from_params(params: &[Pat]) -> Vec<String> {
+    params.iter().flat_map(binding_names_from_pat).collect()
+}
+
+fn binding_names_from_fn_params(params: &[Param]) -> Vec<String> {
+    params
+        .iter()
+        .flat_map(|p| binding_names_from_pat(&p.pat))
+        .collect()
 }
 
 /// The first parameter of a `.map`/`.flatMap` callback, when it's a plain
 /// identifier binding (`(t, i) => …`). Destructuring params (`({id}) => …`) and
-/// index-only positions return None — only the element binding is editable.
+/// index-only positions return None — only the element binding is editable via
+/// the map-param gate (destructured map params still work as member chains
+/// `{id.x}` via the component/map resolution on the server when inlined).
 fn first_ident_pat(params: &[Pat]) -> Option<String> {
     match params.first() {
         Some(Pat::Ident(b)) => Some(b.id.sym.to_string()),
@@ -97,12 +166,9 @@ fn has_editable_text(children: &[JSXElementChild]) -> bool {
                     has_text = true;
                 }
             }
-            // A direct bound value makes text-run mapping ambiguous — leave the
-            // whole element out of THIS path (bound text is handled separately).
             JSXElementChild::JSXExprContainer(_) | JSXElementChild::JSXSpreadChild(_) => {
                 return false;
             }
-            // Nested elements / fragments are preserved verbatim; skip them.
             _ => {}
         }
     }
@@ -110,10 +176,8 @@ fn has_editable_text(children: &[JSXElementChild]) -> bool {
 }
 
 /// A member-access chain of plain identifiers, rendered as a dotted path.
-/// `speaker.name` → `Some("speaker.name")`; `a.b.c` → `Some("a.b.c")`. Returns
-/// `None` for anything else in the chain (computed `a[b]`, a call `fn()`, an
-/// optional-chain link, a private field), so only expressions the write-back
-/// server can resolve to one data-object property are stamped.
+/// `speaker.name` → `Some("speaker.name")`. Returns `None` for computed/call/
+/// optional-chain links.
 fn member_path(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident(id) => Some(id.sym.to_string()),
@@ -129,66 +193,85 @@ fn member_path(expr: &Expr) -> Option<String> {
     }
 }
 
+/// A single bound-text operand: member chain, or bare ident that is a live map
+/// param / component prop (not a skipped reserved name).
+fn bound_operand_path(
+    expr: &Expr,
+    map_params: &[String],
+    component_params: &[Vec<String>],
+) -> Option<String> {
+    match expr {
+        Expr::Member(_) => member_path(expr),
+        Expr::Ident(id) => {
+            let name = id.sym.to_string();
+            if SKIP_BARE_PROPS.contains(&name.as_str()) {
+                return None;
+            }
+            let in_map = map_params.contains(&name);
+            let in_comp = component_params.iter().any(|s| s.contains(&name));
+            if in_map || in_comp {
+                Some(name)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// When the element's only non-whitespace child is a single `{expression}` the
-/// server can rewrite, return the dotted path (or bare name) to stamp as
-/// `data-nc-text-bound`. Two shapes qualify:
-///   - a `{member.chain}` of plain identifiers (`{speaker.name}`) — always
-///     editable; the server resolves the base and rewrites the leaf property.
-///   - a bare `{identifier}` that names an active `.map`/`.flatMap` element
-///     parameter (`map_params`) — a mapped-array element the server rewrites by
-///     value. A bare identifier NOT on the map-param stack (a prop or const) is
-///     rejected here so it stays unstamped.
-/// Anything else — a nested element, more than one expression child, computed or
-/// call access, or static text mixed with an expression — disqualifies it.
-fn editable_bound_text_expr(children: &[JSXElementChild], map_params: &[String]) -> Option<String> {
+/// server can rewrite, return the path (or `a??b` / `a||b` form) to stamp as
+/// `data-nc-text-bound`.
+fn editable_bound_text_expr(
+    children: &[JSXElementChild],
+    map_params: &[String],
+    component_params: &[Vec<String>],
+) -> Option<String> {
     let mut found: Option<String> = None;
     for child in children {
         match child {
             JSXElementChild::JSXText(t) => {
                 if !t.value.trim().is_empty() {
-                    return None; // static text mixed with an expression
+                    return None;
                 }
             }
             JSXElementChild::JSXExprContainer(c) => {
                 if found.is_some() {
-                    return None; // more than one expression child
+                    return None;
                 }
                 match &c.expr {
                     JSXExpr::Expr(e) => match &**e {
-                        // `{member.chain}` — always editable (server resolves base).
-                        Expr::Member(_) => found = Some(member_path(e)?),
-                        // bare `{ident}` — only if it's a live `.map` element param.
-                        Expr::Ident(id) => {
-                            let name = id.sym.to_string();
-                            if map_params.contains(&name) {
-                                found = Some(name);
+                        Expr::Member(_) | Expr::Ident(_) => {
+                            found = Some(bound_operand_path(e, map_params, component_params)?);
+                        }
+                        Expr::Bin(BinExpr { op, left, right, .. })
+                            if matches!(
+                                op,
+                                BinaryOp::NullishCoalescing | BinaryOp::LogicalOr
+                            ) =>
+                        {
+                            let l = bound_operand_path(left, map_params, component_params)?;
+                            let r = bound_operand_path(right, map_params, component_params)?;
+                            let sep = if *op == BinaryOp::NullishCoalescing {
+                                "??"
                             } else {
-                                return None;
-                            }
+                                "||"
+                            };
+                            found = Some(format!("{}{}{}", l, sep, r));
                         }
                         _ => return None,
                     },
                     _ => return None,
                 }
             }
-            // Nested elements / fragments / spreads make this not pure bound text.
             _ => return None,
         }
     }
     found
 }
 
-/// Attributes the write-back server can rewrite (each must be a plain string
-/// literal in source, e.g. `src="/a.png"`). Kept in sync with EDITABLE_ATTRS in
-/// `src/overlay.ts`. `aria-label` is a single hyphenated JSX identifier.
 const EDITABLE_ATTRS: [&str; 6] = ["src", "href", "alt", "title", "placeholder", "aria-label"];
 
-/// The whitelisted attributes on this element whose value is a **string literal**
-/// (`src="…"`) — NOT a `{expression}`, which the server can't rewrite. This is
-/// what makes `<img>`/`<a>` (no static-text child) editable, and — crucially —
-/// it's emitted to the browser as `data-nc-attrs` so the overlay edits only
-/// these and never mistakes a bound `href={x}` (a resolved URL in the DOM, which
-/// looks identical to a literal) for an editable one.
 fn editable_string_attrs(attrs: &[JSXAttrOrSpread]) -> Vec<String> {
     attrs
         .iter()
@@ -211,14 +294,6 @@ fn editable_string_attrs(attrs: &[JSXAttrOrSpread]) -> Vec<String> {
         .collect()
 }
 
-/// The whitelisted attributes on this element whose value is a **bound simple
-/// identifier** (`href={GITHUB}`) — i.e. a `{expression}` that is a bare
-/// variable reference, not a literal, member access, or call. These are emitted
-/// as `data-nc-bound` so the overlay can offer to edit them, prompting the user
-/// to change either the shared source variable (all references) or just this one
-/// (inline a literal here). Anything more complex than a plain identifier
-/// (`href={cfg.url}`, `href={fn()}`) is left out — the server can't resolve it to
-/// a single string declaration safely.
 fn editable_bound_attrs(attrs: &[JSXAttrOrSpread]) -> Vec<String> {
     attrs
         .iter()
@@ -256,10 +331,50 @@ fn already_stamped(attrs: &[JSXAttrOrSpread]) -> bool {
     })
 }
 
+fn data_attr(name: &str, value: String) -> JSXAttrOrSpread {
+    JSXAttrOrSpread::JSXAttr(JSXAttr {
+        span: DUMMY_SP,
+        name: JSXAttrName::Ident(IdentName::new(name.into(), DUMMY_SP)),
+        value: Some(JSXAttrValue::Str(Str {
+            span: DUMMY_SP,
+            value: value.into(),
+            raw: None,
+        })),
+    })
+}
+
+fn span_ident() -> Ident {
+    Ident::new("span".into(), DUMMY_SP, SyntaxContext::empty())
+}
+
+/// Wrap `children` in `<span …attrs>…</span>` so a non-forwarding component still
+/// exposes a stamped host node in the DOM. `data-loc` points at the *component's*
+/// source location so write-back finds the original JSX in the source file.
+fn wrap_children_in_span(
+    children: Vec<JSXElementChild>,
+    attrs: Vec<JSXAttrOrSpread>,
+) -> JSXElementChild {
+    let span_name = JSXElementName::Ident(span_ident());
+    JSXElementChild::JSXElement(Box::new(JSXElement {
+        span: DUMMY_SP,
+        opening: JSXOpeningElement {
+            name: span_name.clone(),
+            span: DUMMY_SP,
+            attrs,
+            self_closing: false,
+            type_args: None,
+        },
+        children,
+        closing: Some(JSXClosingElement {
+            span: DUMMY_SP,
+            name: span_name,
+        }),
+    }))
+}
+
 impl VisitMut for DataLocStamper {
     /// Track `.map`/`.flatMap` callback element params so a bare `{ident}` text
-    /// child nested inside is recognized as a mapped-array element. Push before
-    /// descending (so inner JSX sees the binding) and pop after.
+    /// child nested inside is recognized as a mapped-array element.
     fn visit_mut_call_expr(&mut self, node: &mut CallExpr) {
         let mut pushed = false;
         if let Callee::Expr(callee) = &node.callee {
@@ -286,101 +401,144 @@ impl VisitMut for DataLocStamper {
         }
     }
 
+    /// `function Row({ q }) { … }` — push component param bindings when the
+    /// function name is capitalized.
+    fn visit_mut_fn_decl(&mut self, node: &mut FnDecl) {
+        let mut pushed = false;
+        if is_component_name(&node.ident.sym) {
+            let names = binding_names_from_fn_params(&node.function.params);
+            if !names.is_empty() {
+                self.component_params.push(names);
+                pushed = true;
+            }
+        }
+        node.visit_mut_children_with(self);
+        if pushed {
+            self.component_params.pop();
+        }
+    }
+
+    /// `const Row = function({ q }) { … }` (rare) — same gate via the outer
+    /// VarDeclarator visit; FnExpr itself has no name, so we only push here when
+    /// the function expression carries an inner name (`function Row(){}`).
+    fn visit_mut_fn_expr(&mut self, node: &mut FnExpr) {
+        let mut pushed = false;
+        if let Some(id) = &node.ident {
+            if is_component_name(&id.sym) {
+                let names = binding_names_from_fn_params(&node.function.params);
+                if !names.is_empty() {
+                    self.component_params.push(names);
+                    pushed = true;
+                }
+            }
+        }
+        node.visit_mut_children_with(self);
+        if pushed {
+            self.component_params.pop();
+        }
+    }
+
+    /// `const SessionCard = ({ session }) => …` / `const Row = ({ q }) => …`.
+    fn visit_mut_var_declarator(&mut self, node: &mut VarDeclarator) {
+        let mut pushed = false;
+        if let Pat::Ident(id) = &node.name {
+            if is_component_name(&id.id.sym) {
+                if let Some(init) = &node.init {
+                    let names = match &**init {
+                        Expr::Arrow(a) => Some(binding_names_from_params(&a.params)),
+                        Expr::Fn(f) => Some(binding_names_from_fn_params(&f.function.params)),
+                        _ => None,
+                    };
+                    if let Some(names) = names {
+                        if !names.is_empty() {
+                            self.component_params.push(names);
+                            pushed = true;
+                        }
+                    }
+                }
+            }
+        }
+        node.visit_mut_children_with(self);
+        if pushed {
+            self.component_params.pop();
+        }
+    }
+
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
         node.visit_mut_children_with(self);
 
-        // Stamp host (lowercase, e.g. `div`) elements AND plain-identifier
-        // components (capitalized, e.g. `Reveal`). A host element always renders
-        // its own DOM node, so the stamp lands unconditionally. A component only
-        // exposes the stamp in the DOM if it forwards unknown props to its root
-        // element (`<Tag {...rest}>`, which polymorphic wrappers like `Reveal`
-        // and `next/link`'s `<Link>` do) — when it does, `data-loc` reaches the
-        // DOM and the component's text/attrs become editable; when it doesn't,
-        // the extra prop is an inert no-op. Member/namespaced names (`Foo.Bar`,
-        // `motion.div`, `ns:tag`) are still skipped — their prop forwarding is
-        // less predictable and they aren't the reported case.
-        match &node.opening.name {
-            JSXElementName::Ident(_) => {}
-            _ => return,
+        if !is_stampable_tag(&node.opening.name) {
+            return;
         }
 
-        // Only stamp what the overlay can actually edit: an editable text run
-        // (see has_editable_text) OR bound text (a single {member.chain} or a
-        // `.map`-param {ident} child) OR ≥1 editable string-literal attribute OR
-        // ≥1 editable bound-identifier attribute (href={VAR}).
         let attr_names = editable_string_attrs(&node.opening.attrs);
         let bound_names = editable_bound_attrs(&node.opening.attrs);
-        let bound_text = editable_bound_text_expr(&node.children, &self.map_params);
-        if !has_editable_text(&node.children)
-            && bound_text.is_none()
-            && attr_names.is_empty()
-            && bound_names.is_empty()
-        {
+        let bound_text = editable_bound_text_expr(
+            &node.children,
+            &self.map_params,
+            &self.component_params,
+        );
+        let has_text = has_editable_text(&node.children);
+        if !has_text && bound_text.is_none() && attr_names.is_empty() && bound_names.is_empty() {
             return;
         }
         if already_stamped(&node.opening.attrs) {
             return;
         }
 
-        // Byte-offset span -> (line, column). Column made 1-based to match the
-        // old stamp (`loc.start.column + 1`).
         let loc = self.source_map.lookup_char_pos(node.opening.span.lo);
-        let value = format!("{}:{}:{}", self.filename, loc.line, loc.col.0 + 1);
+        let loc_value = format!("{}:{}:{}", self.filename, loc.line, loc.col.0 + 1);
 
-        node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-            span: DUMMY_SP,
-            name: JSXAttrName::Ident(IdentName::new("data-loc".into(), DUMMY_SP)),
-            value: Some(JSXAttrValue::Str(Str {
-                span: DUMMY_SP,
-                value: value.into(),
-                raw: None,
-            })),
-        }));
+        let capitalized = is_capitalized_tag(&node.opening.name);
+        let needs_text_stamp = has_text || bound_text.is_some();
 
-        // Tell the overlay exactly which attributes are safe to edit (string
-        // literals in source). Without this it can't tell a literal `href="/x"`
-        // from a bound `href={x}` — both are just a resolved value in the DOM.
+        // Capitalized components often swallow props (Reveal). For text/bound-text,
+        // wrap children in a stamped <span> so the DOM always gets a host stamp;
+        // data-loc still points at the component's source location for write-back.
+        if capitalized && needs_text_stamp {
+            let mut span_attrs = vec![data_attr("data-loc", loc_value.clone())];
+            if let Some(path) = &bound_text {
+                span_attrs.push(data_attr("data-nc-text-bound", path.clone()));
+            }
+            let kids = std::mem::take(&mut node.children);
+            node.children = vec![wrap_children_in_span(kids, span_attrs)];
+
+            // Attr stamps (if any) still go on the component — needs forwarding.
+            if !attr_names.is_empty() || !bound_names.is_empty() {
+                node.opening
+                    .attrs
+                    .push(data_attr("data-loc", loc_value));
+                if !attr_names.is_empty() {
+                    node.opening
+                        .attrs
+                        .push(data_attr("data-nc-attrs", attr_names.join(" ")));
+                }
+                if !bound_names.is_empty() {
+                    node.opening
+                        .attrs
+                        .push(data_attr("data-nc-bound", bound_names.join(" ")));
+                }
+            }
+            return;
+        }
+
+        // Host elements and member tags (motion.*): stamp in place.
+        node.opening.attrs.push(data_attr("data-loc", loc_value));
+
         if !attr_names.is_empty() {
-            node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                span: DUMMY_SP,
-                name: JSXAttrName::Ident(IdentName::new("data-nc-attrs".into(), DUMMY_SP)),
-                value: Some(JSXAttrValue::Str(Str {
-                    span: DUMMY_SP,
-                    value: attr_names.join(" ").into(),
-                    raw: None,
-                })),
-            }));
+            node.opening
+                .attrs
+                .push(data_attr("data-nc-attrs", attr_names.join(" ")));
         }
-
-        // Bound text (`<h3>{speaker.name}</h3>`, or `<p>{t}</p>` in a `.map`) —
-        // the overlay edits the rendered value and the server rewrites the data
-        // object's string property. The dotted path (or bare name) tells the
-        // server what to resolve (`speaker.name` → `.name`; `t` → array element).
         if let Some(path) = bound_text {
-            node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                span: DUMMY_SP,
-                name: JSXAttrName::Ident(IdentName::new("data-nc-text-bound".into(), DUMMY_SP)),
-                value: Some(JSXAttrValue::Str(Str {
-                    span: DUMMY_SP,
-                    value: path.into(),
-                    raw: None,
-                })),
-            }));
+            node.opening
+                .attrs
+                .push(data_attr("data-nc-text-bound", path));
         }
-
-        // Bound-identifier attributes (`href={VAR}`) — the overlay offers these
-        // too, but on commit asks whether to rewrite the shared variable or
-        // inline a literal for just this element.
         if !bound_names.is_empty() {
-            node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                span: DUMMY_SP,
-                name: JSXAttrName::Ident(IdentName::new("data-nc-bound".into(), DUMMY_SP)),
-                value: Some(JSXAttrValue::Str(Str {
-                    span: DUMMY_SP,
-                    value: bound_names.join(" ").into(),
-                    raw: None,
-                })),
-            }));
+            node.opening
+                .attrs
+                .push(data_attr("data-nc-bound", bound_names.join(" ")));
         }
     }
 }
@@ -395,6 +553,7 @@ fn process(mut program: Program, metadata: TransformPluginProgramMetadata) -> Pr
         filename,
         source_map: metadata.source_map,
         map_params: Vec::new(),
+        component_params: Vec::new(),
     });
     program
 }
