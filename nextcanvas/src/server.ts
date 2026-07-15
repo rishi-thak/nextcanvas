@@ -452,8 +452,8 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
   if (!fileName) return { ok: false, error: 'missing fileName' };
   if (!expr) return { ok: false, error: 'missing expr' };
 
-  // `{s.name ?? s.role}` / `{a || b}` — try each operand; the DOM shows one side.
-  const candidates = String(expr)
+  // `{s.name ?? s.role}` / `{a || b}` / `path??#lit:—` — try each operand.
+  let candidates = String(expr)
     .split(/\?\?|\|\|/)
     .map((s) => s.trim())
     .filter(Boolean);
@@ -499,6 +499,92 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
   type MorphObject = import('ts-morph').ObjectLiteralExpression;
   type MorphString = import('ts-morph').StringLiteral;
   type MorphSourceFile = import('ts-morph').SourceFile;
+
+  /** String literals inside JSX expression children of this element (ternary arms, ?? fallbacks). */
+  const exprStringLiterals = (): MorphString[] => {
+    const parent = opening.getParent();
+    if (!parent || !Node.isJsxElement(parent)) return [];
+    const out: MorphString[] = [];
+    const walk = (n: MorphNode) => {
+      if (Node.isStringLiteral(n) || Node.isNoSubstitutionTemplateLiteral(n)) {
+        out.push(n as MorphString);
+        return;
+      }
+      n.forEachChild(walk);
+    };
+    for (const ch of parent.getJsxChildren()) {
+      if (Node.isJsxExpression(ch)) {
+        const e = ch.getExpression();
+        if (e) walk(e);
+      }
+    }
+    return out;
+  };
+
+  const rewriteMatchingLiteral = (
+    lits: MorphString[]
+  ): EditResult | undefined => {
+    const matches = lits.filter(
+      (l) => l.getLiteralValue() === String(oldText)
+    );
+    if (matches.length === 1) {
+      matches[0].setLiteralValue(String(newText));
+      const owning = matches[0].getSourceFile();
+      owning.saveSync();
+      return {
+        ok: true,
+        fileName: owning.getFilePath(),
+        lineNumber,
+        oldText: String(oldText),
+        newText,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        error: `"${oldText}" appears ${matches.length}× in the expression; make the value unique, or edit the source file.`,
+      };
+    }
+    return undefined;
+  };
+
+  // `#ternary` — `{cond ? "A" : "B"}` (nested ok): rewrite the arm matching oldText.
+  if (String(expr) === '#ternary') {
+    const hit = rewriteMatchingLiteral(exprStringLiterals());
+    if (hit) return hit;
+    return {
+      ok: false,
+      error: `No string-literal ternary arm equals "${oldText}"; reload and try again.`,
+    };
+  }
+
+  // Candidates that are `#lit:…` rewrite the matching literal in the JSX expr;
+  // remaining candidates fall through to normal path/object resolution below.
+  const pathCandidates: string[] = [];
+  for (const cand of candidates) {
+    if (cand.startsWith('#lit:')) {
+      const want = cand.slice('#lit:'.length);
+      if (want === String(oldText)) {
+        const hit = rewriteMatchingLiteral(exprStringLiterals());
+        if (hit) return hit;
+      }
+      // Literal side isn't what's showing — try other candidates.
+      continue;
+    }
+    if (cand === '#ternary') {
+      const hit = rewriteMatchingLiteral(exprStringLiterals());
+      if (hit) return hit;
+      continue;
+    }
+    pathCandidates.push(cand);
+  }
+  if (pathCandidates.length === 0) {
+    return {
+      ok: false,
+      error: `Could not resolve bound-text expression "${expr}" to an editable string.`,
+    };
+  }
+  candidates = pathCandidates;
 
   const resolveInitializer = (
     name: string,

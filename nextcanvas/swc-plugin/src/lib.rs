@@ -41,10 +41,10 @@
 
 use swc_core::common::{SyntaxContext, SourceMapper, DUMMY_SP};
 use swc_core::ecma::ast::{
-    BinExpr, BinaryOp, CallExpr, Callee, Expr, FnDecl, FnExpr, Ident, IdentName, JSXAttr,
+    BinExpr, BinaryOp, CallExpr, Callee, CondExpr, Expr, FnDecl, FnExpr, Ident, IdentName, JSXAttr,
     JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXClosingElement, JSXElement, JSXElementChild,
-    JSXElementName, JSXExpr, JSXMemberExpr, JSXObject, JSXOpeningElement, MemberProp, ObjectPatProp,
-    Param, Pat, Program, Str, VarDeclarator,
+    JSXElementName, JSXExpr, JSXMemberExpr, JSXObject, JSXOpeningElement, Lit, MemberProp,
+    ObjectPatProp, OptChainBase, Param, Pat, Program, Str, VarDeclarator,
 };
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 use swc_core::plugin::metadata::TransformPluginMetadataContextKind;
@@ -175,9 +175,8 @@ fn has_editable_text(children: &[JSXElementChild]) -> bool {
     has_text
 }
 
-/// A member-access chain of plain identifiers, rendered as a dotted path.
-/// `speaker.name` → `Some("speaker.name")`. Returns `None` for computed/call/
-/// optional-chain links.
+/// A member-access chain of plain identifiers (and optional chaining), rendered
+/// as a dotted path. `speaker.name` / `job?.service` → `Some("job.service")`.
 fn member_path(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident(id) => Some(id.sym.to_string()),
@@ -189,19 +188,67 @@ fn member_path(expr: &Expr) -> Option<String> {
             };
             Some(format!("{}.{}", obj, prop))
         }
+        Expr::OptChain(opt) => match &*opt.base {
+            OptChainBase::Member(m) => {
+                let obj = member_path(&m.obj)?;
+                let prop = match &m.prop {
+                    MemberProp::Ident(id) => id.sym.to_string(),
+                    _ => return None,
+                };
+                Some(format!("{}.{}", obj, prop))
+            }
+            OptChainBase::Call(_) => None,
+        },
         _ => None,
     }
 }
 
-/// A single bound-text operand: member chain, or bare ident that is a live map
-/// param / component prop (not a skipped reserved name).
+/// True when `expr` is a string literal, or a ternary whose every arm is.
+fn is_string_lit_or_ternary(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(Lit::Str(_)) => true,
+        Expr::Cond(CondExpr { cons, alt, .. }) => {
+            is_string_lit_or_ternary(cons) && is_string_lit_or_ternary(alt)
+        }
+        _ => false,
+    }
+}
+
+fn is_string_ternary(expr: &Expr) -> bool {
+    matches!(expr, Expr::Cond(_)) && is_string_lit_or_ternary(expr)
+}
+
+fn is_jsx_like(expr: &Expr) -> bool {
+    match expr {
+        Expr::JSXElement(_) | Expr::JSXFragment(_) | Expr::Lit(Lit::Null(_)) => true,
+        Expr::Ident(id) if &*id.sym == "undefined" => true,
+        _ => false,
+    }
+}
+
+/// `{cond && <span/>}` / `{cond ? <A/> : null}` — inert UI chrome next to a
+/// bound text expr; skip when deciding sole-child bound text.
+fn is_inert_jsx_guard(expr: &Expr) -> bool {
+    match expr {
+        Expr::Bin(BinExpr {
+            op: BinaryOp::LogicalAnd,
+            right,
+            ..
+        }) => is_jsx_like(right),
+        Expr::Cond(CondExpr { cons, alt, .. }) => is_jsx_like(cons) && is_jsx_like(alt),
+        _ => false,
+    }
+}
+
+/// A single bound-text operand: member/optchain, map/component bare ident, or
+/// a string literal encoded as `#lit:<value>` for `??`/`||` fallbacks.
 fn bound_operand_path(
     expr: &Expr,
     map_params: &[String],
     component_params: &[Vec<String>],
 ) -> Option<String> {
     match expr {
-        Expr::Member(_) => member_path(expr),
+        Expr::Member(_) | Expr::OptChain(_) => member_path(expr),
         Expr::Ident(id) => {
             let name = id.sym.to_string();
             if SKIP_BARE_PROPS.contains(&name.as_str()) {
@@ -215,13 +262,67 @@ fn bound_operand_path(
                 None
             }
         }
+        Expr::Lit(Lit::Str(s)) => Some(format!("#lit:{}", s.value.to_string_lossy())),
         _ => None,
     }
 }
 
-/// When the element's only non-whitespace child is a single `{expression}` the
-/// server can rewrite, return the path (or `a??b` / `a||b` form) to stamp as
-/// `data-nc-text-bound`.
+/// Flatten a `??` / `||` chain into `a??b??#lit:—` form.
+fn coalesce_path(
+    expr: &Expr,
+    map_params: &[String],
+    component_params: &[Vec<String>],
+) -> Option<String> {
+    match expr {
+        Expr::Bin(BinExpr { op, left, right, .. })
+            if matches!(op, BinaryOp::NullishCoalescing | BinaryOp::LogicalOr) =>
+        {
+            let l = match &**left {
+                Expr::Bin(BinExpr {
+                    op: lop,
+                    ..
+                }) if matches!(lop, BinaryOp::NullishCoalescing | BinaryOp::LogicalOr) => {
+                    coalesce_path(left, map_params, component_params)?
+                }
+                _ => bound_operand_path(left, map_params, component_params)?,
+            };
+            let r = match &**right {
+                Expr::Bin(BinExpr {
+                    op: rop,
+                    ..
+                }) if matches!(rop, BinaryOp::NullishCoalescing | BinaryOp::LogicalOr) => {
+                    coalesce_path(right, map_params, component_params)?
+                }
+                _ => bound_operand_path(right, map_params, component_params)?,
+            };
+            let sep = if *op == BinaryOp::NullishCoalescing {
+                "??"
+            } else {
+                "||"
+            };
+            Some(format!("{}{}{}", l, sep, r))
+        }
+        _ => None,
+    }
+}
+
+/// Path (or `#ternary` / `a??#lit:x`) to stamp for a single expression.
+fn bound_text_path(
+    expr: &Expr,
+    map_params: &[String],
+    component_params: &[Vec<String>],
+) -> Option<String> {
+    if is_string_ternary(expr) {
+        return Some("#ternary".into());
+    }
+    if let Some(p) = coalesce_path(expr, map_params, component_params) {
+        return Some(p);
+    }
+    bound_operand_path(expr, map_params, component_params)
+}
+
+/// When the element's only meaningful child is a single rewritable `{expression}`
+/// (ignoring whitespace and inert `{cond && <el/>}` guards), return the stamp path.
 fn editable_bound_text_expr(
     children: &[JSXElementChild],
     map_params: &[String],
@@ -235,35 +336,18 @@ fn editable_bound_text_expr(
                     return None;
                 }
             }
-            JSXElementChild::JSXExprContainer(c) => {
-                if found.is_some() {
-                    return None;
+            JSXElementChild::JSXExprContainer(c) => match &c.expr {
+                JSXExpr::Expr(e) if is_inert_jsx_guard(e) => {}
+                JSXExpr::Expr(e) => {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(bound_text_path(e, map_params, component_params)?);
                 }
-                match &c.expr {
-                    JSXExpr::Expr(e) => match &**e {
-                        Expr::Member(_) | Expr::Ident(_) => {
-                            found = Some(bound_operand_path(e, map_params, component_params)?);
-                        }
-                        Expr::Bin(BinExpr { op, left, right, .. })
-                            if matches!(
-                                op,
-                                BinaryOp::NullishCoalescing | BinaryOp::LogicalOr
-                            ) =>
-                        {
-                            let l = bound_operand_path(left, map_params, component_params)?;
-                            let r = bound_operand_path(right, map_params, component_params)?;
-                            let sep = if *op == BinaryOp::NullishCoalescing {
-                                "??"
-                            } else {
-                                "||"
-                            };
-                            found = Some(format!("{}{}{}", l, sep, r));
-                        }
-                        _ => return None,
-                    },
-                    _ => return None,
-                }
-            }
+                _ => return None,
+            },
+            // Nested elements / fragments / spreads → not sole bound text
+            // (dangling exprs among siblings are wrapped separately).
             _ => return None,
         }
     }
@@ -469,6 +553,56 @@ impl VisitMut for DataLocStamper {
 
         if !is_stampable_tag(&node.opening.name) {
             return;
+        }
+
+        // Wrap dangling bound exprs that share the parent with siblings
+        // (`<>…{msg.text}</>` next to other children) so each gets a host span.
+        // Skip when the element is already a sole-bound-text candidate.
+        if editable_bound_text_expr(
+            &node.children,
+            &self.map_params,
+            &self.component_params,
+        )
+        .is_none()
+        {
+            let loc = self.source_map.lookup_char_pos(node.opening.span.lo);
+            let loc_value = format!("{}:{}:{}", self.filename, loc.line, loc.col.0 + 1);
+            let mut out: Vec<JSXElementChild> = Vec::with_capacity(node.children.len());
+            let mut wrapped = false;
+            for child in std::mem::take(&mut node.children) {
+                let path = match &child {
+                    JSXElementChild::JSXExprContainer(c) => match &c.expr {
+                        JSXExpr::Expr(e)
+                            if !is_inert_jsx_guard(e)
+                                && bound_text_path(
+                                    e,
+                                    &self.map_params,
+                                    &self.component_params,
+                                )
+                                .is_some() =>
+                        {
+                            bound_text_path(e, &self.map_params, &self.component_params)
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    let attrs = vec![
+                        data_attr("data-loc", loc_value.clone()),
+                        data_attr("data-nc-text-bound", path),
+                    ];
+                    out.push(wrap_children_in_span(vec![child], attrs));
+                    wrapped = true;
+                } else {
+                    out.push(child);
+                }
+            }
+            node.children = out;
+            // If we only wrapped dangling exprs and the parent has nothing else
+            // editable, we still fall through — parent may get attr stamps, or
+            // return early below when empty.
+            let _ = wrapped;
         }
 
         let attr_names = editable_string_attrs(&node.opening.attrs);
