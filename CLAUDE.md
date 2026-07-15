@@ -324,10 +324,20 @@ Three edit kinds, all dev-only and written back through the :3131 server.
 **Text editing.** Static JSX text (`<h1>Hello</h1>`) **and** text mixed with
 inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
 surrounding text runs are editable and the inline elements are locked +
-preserved. Bound values (`<h1>{title}</h1>`) — any element with a direct
-`{expression}` child — are left unstamped and not editable. Repeated components
-sharing one source line (via `.map`) edit the shared source, affecting all
-instances.
+preserved. A **bare** bound value (`<h1>{title}</h1>` — a lone `{identifier}` or
+any mixed text+`{expr}`) is still left unstamped and not editable. Repeated
+components sharing one source line (via `.map`) edit the shared source, affecting
+all instances.
+
+**Bound-text editing** (the third text flavor — see the dedicated subsection
+below). An element whose *only* child is a `{member.chain}` of plain identifiers
+(`<h3>{speaker.name}</h3>`, `<h1>{cfg.title}</h1>`) IS editable: the plugin
+stamps it `data-nc-text-bound="speaker.name"` and the server resolves the
+binding back to the string property in the source data — following a `.map` to
+its array, or a direct object variable, across a relative import. This is what
+makes data-array-driven content (a `SPEAKERS.map(...)` list, a config object)
+editable even though the JSX only contains `{expressions}`. Computed access,
+calls, and bare `{title}` stay unstamped.
 
 **Attribute editing.** Whitelisted JSX attributes (`src`, `href`, `alt`,
 `title`, `placeholder`, `aria-label`) via a hover chip + attribute panel, in two
@@ -404,6 +414,49 @@ Non-obvious constraints learned building this — **do not re-learn the hard way
 
 Legacy single-text payloads still work unchanged (overlay sends `oldText/newText`
 when the element has no child elements; server falls through to the old path).
+
+### Bound-text edits (`{member.chain}` from a data array/object)
+
+Makes data-driven text editable — `<h3>{speaker.name}</h3>` rendered inside
+`SPEAKERS.map((speaker) => …)`, or `<h1>{cfg.title}</h1>` from a config object —
+even though the JSX child is a `{expression}`, not literal text.
+
+- **Plugin** (`editable_bound_text_expr` in `lib.rs`): stamps
+  `data-nc-text-bound="<dotted.path>"` on an element whose *only* non-whitespace
+  child is a single `{member.chain}` of plain identifiers (at least one dot).
+  Bare `{title}`, computed/`[i]` access, calls, and any mixed text+`{expr}` stay
+  unstamped. The stamp is broad — it does **not** verify the base resolves to
+  anything; the server decides that and error-toasts if it can't.
+- **Overlay**: a stamped `{member}` renders as a plain text node, so the existing
+  single-text dblclick path edits it; the commit is flagged `textBound` (carrying
+  `expr`, and a legacy `index` the server now ignores — see targeting) so the
+  dispatcher routes to `applyBoundTextEdit` instead of the literal-text path.
+  Threaded through undo/redo and Manual-mode staging like a normal text edit.
+- **Server** (`applyBoundTextEdit`): from the stamped element's source location
+  it walks JSX ancestors to see whether the base identifier is a `.map`/callback
+  parameter (`<collection>.map(...)` → resolve `collection` to its **array
+  literal**) or a **direct object** variable. Either declaration may be a local
+  `const` or a **relatively-imported** one (`resolveModuleFile` follows the
+  specifier and adds the data module to the project); the property is rewritten in
+  its **owning file** and that file is `saveSync`'d — Fast Refresh still reflects
+  it because the data module is in the graph.
+
+**Targeting is by VALUE, not position** (this is the deliberate design choice,
+and it differs from an earlier positional-index draft). Among the array's object
+elements, the server edits the one whose bound property currently equals
+`oldText`. Rationale: a `.map`'s rendered output is routinely **filtered and
+reordered** (a category filter, a pinned-items-first sort), so DOM order ≠ array
+order and a positional index would rewrite the wrong entry (or, value-guarded,
+just fail). Consequences to keep in mind:
+- A **unique** value (names, descriptions) edits cleanly regardless of order.
+- A value **shared by several entries** (e.g. a repeated category label) is
+  genuinely ambiguous — DOM position can't safely disambiguate under reordering —
+  so the edit is **refused** with a "make it unique / edit the data file" message
+  rather than risk mis-targeting.
+- **No** matching entry ⇒ the source moved on ⇒ rejected as stale.
+Only string-literal leaf properties are editable; a number/expression leaf
+(`day: 1`) is rejected. Undo/redo works because each direction re-values-matches
+the current source.
 
 ### TODO — wire style edits into Manual-mode staging
 
