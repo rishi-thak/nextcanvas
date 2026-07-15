@@ -42,6 +42,11 @@ interface TextChange {
   before: string[];
   after: string[];
   mixed: boolean;
+  // Set when the element's child is a `{member.chain}` (`data-nc-text-bound`)
+  // rather than literal text: `expr` is the dotted path and `index` the `.map`
+  // iteration position, so the server rewrites the underlying data object.
+  // Always a single run (bound text is never mixed).
+  textBound?: { expr: string; index: number };
 }
 
 // An attribute edit (src/href/alt/…); before/after are the attribute's string
@@ -182,6 +187,9 @@ whenBodyReady(function initNextCanvas(): void {
     // manual-mode Save writes it through the same bound path as autosave.
     bound?: boolean;
     scope?: 'all' | 'one';
+    // Set for a bound-TEXT edit (`{speaker.name}`), so a manual-mode Save writes
+    // it through the same bound-text path as autosave.
+    textBound?: { expr: string; index: number };
   }
   const staged = new Map<string, StagedEdit>();
   function stageKey(source: NextCanvasSource, attr?: string): string {
@@ -235,6 +243,28 @@ whenBodyReady(function initNextCanvas(): void {
       if (n.nodeType === 3 && (n.nodeValue ?? '').trim() !== '') return true;
     }
     return false;
+  }
+
+  // For a bound-text element (`data-nc-text-bound="speaker.name"`), the dotted
+  // path plus this element's index among all instances sharing its exact
+  // `data-loc` — i.e. its `.map` iteration position (document order === array
+  // order). Returns undefined for a plain literal-text element. The server uses
+  // the index to pick the right data object; a direct-object binding is index 0.
+  function getTextBound(
+    el: HTMLElement
+  ): { expr: string; index: number } | undefined {
+    const expr = el.getAttribute('data-nc-text-bound');
+    const loc = el.getAttribute('data-loc');
+    if (!expr || !loc) return undefined;
+    // Filter by data-loc among bound-text elements — avoids escaping the loc
+    // (which contains `:` `/` `\`) into an attribute selector. Every `.map`
+    // instance of this element shares one data-loc; distinct source elements
+    // (different lines) never collide.
+    const peers = Array.from(
+      document.querySelectorAll('[data-nc-text-bound]')
+    ).filter((n) => n.getAttribute('data-loc') === loc);
+    const index = peers.indexOf(el);
+    return { expr, index: index < 0 ? 0 : index };
   }
 
   // The element's non-whitespace DIRECT text nodes, in order. normalize() first
@@ -721,13 +751,26 @@ whenBodyReady(function initNextCanvas(): void {
     source: NextCanvasSource,
     from: string[],
     to: string[],
-    mixed: boolean
+    mixed: boolean,
+    textBound?: { expr: string; index: number }
   ): Promise<{ ok: boolean; error?: string }> {
     const base = {
       fileName: source.fileName,
       lineNumber: source.lineNumber,
       columnNumber: source.columnNumber,
     };
+    // Bound text: rewrite the data object's property (server dispatches on
+    // `textBound`). Always single-run, so from[0]/to[0].
+    if (textBound) {
+      return postEdit({
+        ...base,
+        textBound: true,
+        expr: textBound.expr,
+        index: textBound.index,
+        oldText: from[0],
+        newText: to[0],
+      });
+    }
     if (!mixed) {
       return postEdit({ ...base, oldText: from[0], newText: to[0] });
     }
@@ -768,12 +811,12 @@ whenBodyReady(function initNextCanvas(): void {
   function writeForward(c: EditChange): Promise<{ ok: boolean; error?: string }> {
     return c.kind === 'attr'
       ? writeAttr(c.source, c.attr, c.before, c.after, c.bound, c.scope)
-      : writeText(c.source, c.before, c.after, c.mixed);
+      : writeText(c.source, c.before, c.after, c.mixed, c.textBound);
   }
   function writeReverse(c: EditChange): Promise<{ ok: boolean; error?: string }> {
     return c.kind === 'attr'
       ? writeAttr(c.source, c.attr, c.after, c.before, c.bound, c.scope)
-      : writeText(c.source, c.after, c.before, c.mixed);
+      : writeText(c.source, c.after, c.before, c.mixed, c.textBound);
   }
   // Restore the change's element to one of its ends in the live DOM.
   function applyChangeDom(c: EditChange, to: 'before' | 'after'): void {
@@ -792,7 +835,7 @@ whenBodyReady(function initNextCanvas(): void {
       key,
       c.kind === 'attr'
         ? { el: c.el, source: c.source, kind: 'attr', attr: c.attr, oldRuns: [c.before], mixed: false, bound: c.bound, scope: c.scope }
-        : { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed }
+        : { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed, textBound: c.textBound }
     );
   }
 
@@ -946,7 +989,7 @@ whenBodyReady(function initNextCanvas(): void {
         jobs.push(() => writeAttr(s.source, attr, s.oldRuns[0], cur, bound, scope));
       } else {
         const cur = readRuns(s.el);
-        jobs.push(() => writeText(s.source, s.oldRuns, cur, s.mixed));
+        jobs.push(() => writeText(s.source, s.oldRuns, cur, s.mixed, s.textBound));
       }
     });
     if (jobs.length === 0) {
@@ -1619,7 +1662,15 @@ whenBodyReady(function initNextCanvas(): void {
           if (newText.trim() === '') el.textContent = oldText;
           return;
         }
-        commit({ kind: 'text', el, source, before: [oldText], after: [newText], mixed: false });
+        commit({
+          kind: 'text',
+          el,
+          source,
+          before: [oldText],
+          after: [newText],
+          mixed: false,
+          textBound: getTextBound(el),
+        });
         return;
       }
 

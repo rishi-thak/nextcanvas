@@ -44,6 +44,13 @@ interface Edit {
   // this element ('one'). Ignored unless `attrName` is also set.
   bound?: boolean;
   scope?: 'all' | 'one';
+  // Bound TEXT edit: the element's child is a `{member.chain}` (`{speaker.name}`)
+  // stamped as `data-nc-text-bound`. `expr` is that dotted path; `index` is the
+  // `.map` iteration position (0 for a direct-object binding). oldText/newText
+  // carry the string property's value. See applyBoundTextEdit.
+  textBound?: boolean;
+  expr?: string;
+  index?: number;
 }
 
 interface StyleEdit {
@@ -385,6 +392,298 @@ function applyBoundAttrEdit(
   return { ok: true, fileName, lineNumber, oldText, newText };
 }
 
+/**
+ * Resolve a relative import specifier to a SourceFile in the project, adding it
+ * on demand. Tries the specifier as-is, then with each common extension, then as
+ * a directory `index.*`. Returns undefined for bare/aliased specifiers we can't
+ * resolve without tsconfig paths (the caller reports a helpful error).
+ */
+function resolveModuleFile(
+  spec: string,
+  fromFile: string,
+  project: import('ts-morph').Project
+): import('ts-morph').SourceFile | undefined {
+  if (!spec.startsWith('.')) return undefined;
+  const base = path.resolve(path.dirname(fromFile), spec);
+  const exts = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+  const candidates = [
+    ...exts.map((e) => base + e),
+    ...['index.ts', 'index.tsx', 'index.js', 'index.jsx'].map((f) =>
+      path.join(base, f)
+    ),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c) && fs.statSync(c).isFile()) {
+      return (
+        project.getSourceFile(c) ?? project.addSourceFileAtPathIfExists(c) ?? undefined
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Edit bound TEXT — an element whose child is a `{member.chain}` (`{speaker.name}`,
+ * `{cfg.title}`), stamped by the plugin as `data-nc-text-bound`. The rendered
+ * value lives as a string property on a data object, so we resolve the binding
+ * back to that object and rewrite the property.
+ *
+ * Resolution walks the JSX ancestors of the stamped element:
+ *   - `.map` binding: a callback whose parameter is the base identifier, called
+ *     as `<collection>.map(...)`. The collection variable → its array literal →
+ *     the element whose bound property equals `oldText` (see targeting below).
+ *   - direct-object binding (`cfg.title`): the base identifier resolves straight
+ *     to a variable whose initializer is an object literal.
+ * Either declaration may be **imported** from another module, which we resolve
+ * and add to the project; the property is rewritten and that owning file saved
+ * (Fast Refresh still reflects it — the data module is in the graph).
+ *
+ * Targeting is by VALUE, not position: among the array's entries we pick the one
+ * whose bound property currently equals `oldText`. The rendered `.map` output is
+ * routinely filtered/reordered (pinned-first, track filters), so DOM position
+ * doesn't track array index. A unique value edits cleanly; a value shared by
+ * several entries is genuinely ambiguous and is refused rather than mis-targeted;
+ * no match means the source moved on and the edit is rejected as stale.
+ */
+export function applyBoundTextEdit(edit: Edit): EditResult {
+  const { Project, SyntaxKind, Node } =
+    require('ts-morph') as typeof import('ts-morph');
+
+  const { fileName, lineNumber, columnNumber, expr, oldText, newText } = edit;
+  if (!fileName) return { ok: false, error: 'missing fileName' };
+  if (!expr) return { ok: false, error: 'missing expr' };
+
+  const parts = String(expr).split('.');
+  const base = parts[0];
+  const propPath = parts.slice(1);
+  if (!base) {
+    return {
+      ok: false,
+      error: `Bound-text expression "${expr}" has no base identifier.`,
+    };
+  }
+  // Two stamped shapes reach here: a `{member.chain}` (propPath has ≥1 segment,
+  // e.g. `speaker.name`) that resolves to a string property of an object, and a
+  // bare `{identifier}` (propPath empty, e.g. `t`) that is a `.map` element over
+  // an array of string literals. Both are value-matched below.
+
+  const project = new Project({
+    compilerOptions: { allowJs: true, jsx: 4 /* preserve */ },
+    skipAddingFilesFromTsConfig: true,
+  });
+  const sourceFile = project.addSourceFileAtPath(fileName);
+
+  // Locate the stamped opening element at lineNumber (+column to disambiguate
+  // several elements sharing a line), same as applyStyleEdit.
+  const opens = [
+    ...sourceFile.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+    ...sourceFile.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+  ].filter((n) => n.getStartLineNumber() === Number(lineNumber));
+  if (opens.length === 0) {
+    return {
+      ok: false,
+      error: `No JSX element found at ${fileName}:${lineNumber} to edit.`,
+    };
+  }
+  let opening = opens[0];
+  if (opens.length > 1 && columnNumber) {
+    opening = opens
+      .map((n) => ({
+        n,
+        d: Math.abs(
+          sourceFile.getLineAndColumnAtPos(n.getStart()).column -
+            Number(columnNumber)
+        ),
+      }))
+      .sort((a, b) => a.d - b.d)[0].n;
+  }
+
+  // Resolve `base` to the data it renders. `.map`/`.flatMap` binding if base is a
+  // callback parameter of a `<collection>.map(...)` call — the collection is
+  // either a named variable (collectionName) or an inline array literal
+  // (collectionArray). Otherwise it's a direct-object binding (`cfg.title`).
+  let collectionName: string | undefined;
+  let collectionArray: import('ts-morph').ArrayLiteralExpression | undefined;
+  for (const anc of opening.getAncestors()) {
+    if (!Node.isArrowFunction(anc) && !Node.isFunctionExpression(anc)) continue;
+    const hasParam = anc.getParameters().some((p) => {
+      const nn = p.getNameNode();
+      return Node.isIdentifier(nn) && nn.getText() === base;
+    });
+    if (!hasParam) continue;
+    const call = anc.getParent();
+    if (call && Node.isCallExpression(call)) {
+      const callee = call.getExpression();
+      if (
+        Node.isPropertyAccessExpression(callee) &&
+        (callee.getName() === 'map' || callee.getName() === 'flatMap')
+      ) {
+        const objExpr = callee.getExpression();
+        if (Node.isIdentifier(objExpr)) collectionName = objExpr.getText();
+        else if (Node.isArrayLiteralExpression(objExpr)) collectionArray = objExpr;
+      }
+    }
+    break; // the nearest binding of `base` wins, map or not
+  }
+
+  // Resolve a variable's initializer, following a relative import if needed.
+  const resolveInitializer = (
+    name: string
+  ): { init?: import('ts-morph').Expression; where: string } => {
+    const local = sourceFile.getVariableDeclaration(name);
+    if (local) return { init: local.getInitializer(), where: 'local' };
+    for (const imp of sourceFile.getImportDeclarations()) {
+      const named = imp
+        .getNamedImports()
+        .find((ni) => (ni.getAliasNode()?.getText() ?? ni.getName()) === name);
+      const isDefault = imp.getDefaultImport()?.getText() === name;
+      if (!named && !isDefault) continue;
+      const spec = imp.getModuleSpecifierValue();
+      const dataFile =
+        resolveModuleFile(spec, fileName, project) ??
+        imp.getModuleSpecifierSourceFile();
+      if (!dataFile) {
+        return {
+          init: undefined,
+          where: `unresolved import "${spec}"`,
+        };
+      }
+      const exportName = named ? named.getName() : name;
+      const decl = dataFile.getVariableDeclaration(exportName);
+      return { init: decl?.getInitializer(), where: dataFile.getFilePath() };
+    }
+    return { init: undefined, where: 'not found' };
+  };
+
+  // Walk propPath into an object literal down to the leaf string-literal
+  // property. Returns the StringLiteral node, or an error describing what broke.
+  const leafOf = (
+    root: import('ts-morph').ObjectLiteralExpression
+  ): { leaf?: import('ts-morph').StringLiteral; err?: string } => {
+    let obj = root;
+    for (let i = 0; i < propPath.length - 1; i++) {
+      const p = obj.getProperty(propPath[i]);
+      if (!p || !Node.isPropertyAssignment(p))
+        return { err: `"${expr}": no property "${propPath[i]}".` };
+      const v = p.getInitializer();
+      if (!v || !Node.isObjectLiteralExpression(v))
+        return { err: `"${expr}": "${propPath[i]}" is not a nested object.` };
+      obj = v;
+    }
+    const leafName = propPath[propPath.length - 1];
+    const la = obj.getProperty(leafName);
+    if (!la || !Node.isPropertyAssignment(la))
+      return { err: `"${expr}": no property "${leafName}".` };
+    const li = la.getInitializer();
+    if (!li || !Node.isStringLiteral(li))
+      return {
+        err: `"${expr}": "${leafName}" is not a string literal, so it can't be edited.`,
+      };
+    return { leaf: li };
+  };
+
+  let leafInit: import('ts-morph').StringLiteral;
+  if (collectionName || collectionArray) {
+    let arr: import('ts-morph').ArrayLiteralExpression;
+    if (collectionArray) {
+      arr = collectionArray;
+    } else {
+      const { init, where } = resolveInitializer(collectionName!);
+      if (!init || !Node.isArrayLiteralExpression(init)) {
+        return {
+          ok: false,
+          error: `Could not resolve "${collectionName}" to an array literal (${where}). Bound-text edits need a local or relatively-imported \`const ${collectionName} = [ … ]\`.`,
+        };
+      }
+      arr = init;
+    }
+    const label = collectionName ?? 'the mapped array';
+    // Value-match targeting: pick the array entry whose bound value CURRENTLY
+    // equals the edited text — not a positional index. A `.map`'s rendered output
+    // is routinely filtered and reordered (e.g. pinned-first), so DOM position
+    // ≠ array index; matching by value edits the entry the user actually changed.
+    const matches: import('ts-morph').StringLiteral[] = [];
+    let leafErr: string | undefined;
+    for (const el of arr.getElements()) {
+      if (propPath.length === 0) {
+        // Array-of-strings (a bare `{t}` from a `.map`): the element itself is
+        // the rendered string, so it is the leaf to match/rewrite.
+        if (
+          Node.isStringLiteral(el) &&
+          el.getLiteralValue() === String(oldText)
+        ) {
+          matches.push(el);
+        }
+        continue;
+      }
+      if (!Node.isObjectLiteralExpression(el)) continue;
+      const { leaf, err } = leafOf(el);
+      if (err) {
+        leafErr = err;
+        continue;
+      }
+      if (leaf!.getLiteralValue() === String(oldText)) matches.push(leaf!);
+    }
+    if (matches.length === 1) {
+      leafInit = matches[0];
+    } else if (matches.length > 1) {
+      // Same value on several entries (e.g. a repeated `track`). Positional
+      // disambiguation is unsafe here — DOM order isn't array order — so refuse
+      // rather than risk rewriting the wrong entry.
+      return {
+        ok: false,
+        error: `"${oldText}" appears ${matches.length}× in ${label}; nextcanvas can't tell which entry you meant. Make the value unique, or edit it directly in the data file.`,
+      };
+    } else {
+      return {
+        ok: false,
+        error:
+          leafErr ??
+          `No entry in ${label} currently ${
+            propPath.length ? `has ${propPath.join('.')} === ` : 'equals '
+          }"${oldText}"; reload and try again.`,
+      };
+    }
+  } else {
+    // Direct-object binding needs a member chain (`cfg.title`); a bare
+    // identifier with no `.map` binding has nothing resolvable to target.
+    if (propPath.length === 0) {
+      return {
+        ok: false,
+        error: `Bound-text expression "${expr}" is a bare identifier that isn't a mapped-array element; nextcanvas can't resolve it to an editable string.`,
+      };
+    }
+    const { init, where } = resolveInitializer(base);
+    if (!init || !Node.isObjectLiteralExpression(init)) {
+      return {
+        ok: false,
+        error: `Could not resolve "${base}" to an object literal (${where}). Bound-text edits need a local or relatively-imported object or \`.map\` array.`,
+      };
+    }
+    const { leaf, err } = leafOf(init);
+    if (!leaf) return { ok: false, error: err! };
+    // Direct object has a single target; value-guard against a stale edit.
+    if (leaf.getLiteralValue() !== String(oldText)) {
+      return {
+        ok: false,
+        error: `Bound-text edit no longer matches the source ("${leaf.getLiteralValue()}" ≠ "${oldText}"); reload and try again.`,
+      };
+    }
+    leafInit = leaf;
+  }
+
+  leafInit.setLiteralValue(String(newText));
+  const owning = leafInit.getSourceFile();
+  owning.saveSync();
+  return {
+    ok: true,
+    fileName: owning.getFilePath(),
+    lineNumber,
+    oldText: String(oldText),
+    newText,
+  };
+}
+
 /** A single-quoted JS string literal, safe for arbitrary CSS values. */
 function jsString(value: string): string {
   return "'" + value.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
@@ -540,9 +839,11 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
     try {
       const result = isStyle
         ? applyStyleEdit(payload)
-        : payload.attrName
-          ? applyAttrEdit(payload)
-          : applyEdit(payload);
+        : payload.textBound
+          ? applyBoundTextEdit(payload)
+          : payload.attrName
+            ? applyAttrEdit(payload)
+            : applyEdit(payload);
       const status = result.ok ? 200 : 422;
       if (result.ok) {
         console.log(
