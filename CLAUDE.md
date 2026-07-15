@@ -148,10 +148,11 @@ Pieces:
 
 - **`swc-plugin/src/lib.rs`** (Rust → `swc/nextcanvas_swc.wasm`) — the
   source-mapping mechanism. An **SWC plugin** that stamps
-  `data-loc="<absFile>:<line>:<col>"` onto every **host** (lowercase) JSX element
-  at compile time. Because it runs *inside* SWC, it works under both the webpack
-  (next-swc) and Turbopack pipelines — unlike a Babel plugin, which opts Next out
-  of SWC. Injected via `experimental.swcPlugins` by `withCanvas` (no `.babelrc`).
+  `data-loc="<absFile>:<line>:<col>"` at compile time onto **host** (lowercase)
+  JSX elements **and plain-identifier components** (`<Reveal as="h2">…`, `<Link>…`)
+  — see the component-stamping constraint below for the forwarding caveat. Because
+  it runs *inside* SWC, it works under both the webpack (next-swc) and Turbopack
+  pipelines. Injected via `experimental.swcPlugins` by `withCanvas`.
 - **`src/overlay.ts`** — vanilla-DOM client (no React). Highlights text elements,
   makes them `contentEditable` on double-click, reads `data-loc` off the DOM, and
   POSTs `{fileName, lineNumber, oldText, newText}` to the server on commit.
@@ -171,6 +172,34 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
 
 ## Non-obvious constraints (do not re-learn these the hard way)
 
+- **Components are stamped, but landing the stamp is best-effort.** The plugin
+  stamps plain-identifier **components** (capitalized, `<Reveal as="h2">…`,
+  `<Link>…`) as well as host elements, so text/attrs wrapped in a component can be
+  editable. But the stamp is passed as a React *prop* (`data-loc="…"`); it only
+  reaches the DOM if the component forwards unknown props to its root element
+  (`<Tag {...rest}>`) — which polymorphic wrappers (`Reveal`, `next/link`'s
+  `Link`) do. If a component swallows props, the stamp is an inert no-op and the
+  text stays uneditable (harmless, just not editable). If the component also
+  *transforms* its children (uppercases, wraps) the DOM text won't match the
+  source `oldText` and the write-back error-toasts. **Member/namespaced names
+  (`motion.div`, `Foo.Bar`, `ns:tag`) are still NOT stamped** — their forwarding
+  is less predictable; only a bare-`Ident` tag qualifies. The gate is otherwise
+  unchanged: an element still needs editable text, bound text, or an editable
+  attribute to be stamped at all.
+- **Bound text is editable in ONE unified path, value-matched.** Beyond literal
+  text, the plugin stamps an element whose *only* non-whitespace child is a single
+  bound expression, in two shapes, emitting `data-nc-text-bound="<expr>"`:
+  (1) a `{member.chain}` of plain identifiers (`{speaker.name}`, `{cfg.title}` —
+  at least one dot); (2) a bare `{identifier}` **only when it names the element
+  parameter of an enclosing `.map`/`.flatMap` callback** (`truths.map((t) =>
+  <p>{t}</p>)`), tracked with a scope stack (`map_params`, pushed in
+  `visit_mut_call_expr` around the callback descent, only `param[0]` — the
+  element, not the index `i`). The map-param gate is deliberate: a bare `{ident}`
+  that's a component prop (`<pre>{children}</pre>`) or an arbitrary const is left
+  unstamped — the server couldn't resolve it and the affordance would only bounce.
+  Computed `{items[i].x}`, calls `{fn().y}`, and text mixed with an expression
+  (`Hi {name}`) all stay unstamped. See the dedicated bound-text subsection for
+  the server-side resolver and the value-match decision.
 - **`fiber._debugSource` is NOT available** in current Next App Router / React
   dev builds. Do not try to resolve source location from React internals — that
   is why source mapping uses the compile-time `data-loc` stamp.
@@ -324,10 +353,23 @@ Three edit kinds, all dev-only and written back through the :3131 server.
 **Text editing.** Static JSX text (`<h1>Hello</h1>`) **and** text mixed with
 inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
 surrounding text runs are editable and the inline elements are locked +
-preserved. Bound values (`<h1>{title}</h1>`) — any element with a direct
-`{expression}` child — are left unstamped and not editable. Repeated components
-sharing one source line (via `.map`) edit the shared source, affecting all
-instances.
+preserved. Text wrapped in a **plain-identifier component**
+(`<Reveal as="h2">Here's what we know:</Reveal>`, `<Link>Home</Link>`) is editable
+too, provided the component forwards props to its DOM root (see the
+component-stamping constraint above). Repeated components sharing one source line
+(via `.map`) edit the shared source, affecting all instances.
+
+**Bound-text editing** (the third text flavor — see the dedicated subsection
+below). An element whose *only* child is a bound expression IS editable when it's
+either a `{member.chain}` of plain identifiers (`<h3>{speaker.name}</h3>`,
+`<h1>{cfg.title}</h1>`) or a bare `{identifier}` that is a `.map`/`.flatMap`
+element parameter (`truths.map((t) => <p>{t}</p>)`): the plugin stamps
+`data-nc-text-bound` and the server resolves the binding back to the string in
+the source data — a `.map` array (of objects or of strings) or a direct object
+variable, across a relative import — and rewrites it. This makes data-driven
+content editable even though the JSX only contains `{expressions}`. A bare
+`{title}` that is a prop/const, computed/`[i]` access, calls, and any mixed
+text+`{expr}` stay unstamped and not editable.
 
 **Attribute editing.** Whitelisted JSX attributes (`src`, `href`, `alt`,
 `title`, `placeholder`, `aria-label`) via a hover chip + attribute panel, in two
@@ -404,6 +446,53 @@ Non-obvious constraints learned building this — **do not re-learn the hard way
 
 Legacy single-text payloads still work unchanged (overlay sends `oldText/newText`
 when the element has no child elements; server falls through to the old path).
+
+### Bound-text edits (`{member.chain}` / `.map`'d `{ident}` → a data array/object)
+
+Makes data-driven text editable even though the JSX child is a `{expression}`,
+not literal text — `<h3>{speaker.name}</h3>` inside `SPEAKERS.map((s) => …)`,
+`<p>{t}</p>` inside `truths.map((t) => …)`, or `<h1>{cfg.title}</h1>` from a
+config object. **One code path** covers both stamped shapes; the reconciliation
+(three parallel prototypes) settled on **value-match** targeting as the invariant.
+
+- **Plugin** (`editable_bound_text_expr` + the `map_params` scope stack in
+  `lib.rs`): stamps `data-nc-text-bound="<expr>"` where `<expr>` is either a
+  dotted `member.chain` (stamped unconditionally — the server decides if the base
+  resolves, error-toasting if not) or a bare `identifier` that is a live
+  `.map`/`.flatMap` element param (gated by `map_params`). See the bound-text
+  constraint above for the exact gate.
+- **Overlay**: a stamped `{member}` / `{t}` renders as a plain text node, so the
+  existing single-text dblclick path edits it; the commit is flagged `textBound`
+  (carrying `expr`, plus a legacy `index` the server ignores — see targeting) so
+  the dispatcher routes to `applyBoundTextEdit`. `getTextBound` reads
+  `data-nc-text-bound` generically, so both shapes flow through unchanged.
+  Threaded through undo/redo and Manual-mode staging like a normal text edit.
+- **Server** (`applyBoundTextEdit`): from the stamped element's source location
+  it walks JSX ancestors to classify the base identifier — a `.map`/`.flatMap`
+  callback param (`<collection>.map(...)` → resolve `collection` to its **array
+  literal**, named or inline) or a **direct object** variable. Either declaration
+  may be a local `const` or a **relatively-imported** one (`resolveModuleFile`
+  follows the specifier and adds the data module to the project); the property is
+  rewritten in its **owning file** and that file is `saveSync`'d — Fast Refresh
+  still reflects it because the data module is in the graph. A dotted `expr`
+  targets an object property (`.name`), possibly nested (`cfg.meta.title`); a
+  dot-less `expr` targets an array **of string literals** directly (the bare
+  `{t}` shape). Only string-literal leaves are editable; a number/expression leaf
+  (`day: 1`) is rejected.
+
+**Targeting is by VALUE, not position** — the deliberate design decision, and the
+one thing that superseded an earlier positional-index draft. Among the array's
+entries the server edits the one whose bound value currently equals `oldText`.
+Rationale: a `.map`'s rendered output is routinely **filtered and reordered** (a
+track filter, a pinned-items-first sort), so DOM order ≠ array order and a
+positional index would rewrite the wrong entry. Consequences:
+- A **unique** value (names, descriptions) edits cleanly regardless of order.
+- A value **shared by several entries** is genuinely ambiguous — DOM position
+  can't safely disambiguate under reordering — so the edit is **refused** with a
+  "make it unique / edit the data file" message rather than risk mis-targeting.
+- **No** matching entry ⇒ the source moved on ⇒ rejected as stale. A direct
+  object is a single target but still value-guarded against a stale edit.
+Undo/redo works because each direction re-values-matches the current source.
 
 ### TODO — wire style edits into Manual-mode staging
 
