@@ -449,3 +449,74 @@ test('Reveal-wrapped direct object (COUNCIL_COPY) edits the imported object', ()
   assert.match(after['copy.ts'], /eyebrow: 'STEERING COUNCIL'/);
   assert.equal(after['page.tsx'], page);
 });
+
+// --- Ternary string arms / ?? with literal fallback / optional chain ------------
+
+test('ternary string arms: edits the arm matching oldText', () => {
+  const src = [
+    'export const B = ({ loading }: { loading: boolean }) => (',
+    '  <button>{loading ? "Signing in..." : "Sign in"}</button>',
+    ');',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit({ 'c.tsx': src }, 'c.tsx', {
+    lineNumber: 2,
+    expr: '#ternary',
+    oldText: 'Sign in',
+    newText: 'Log in',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['c.tsx'], /"Log in"/);
+  assert.match(after['c.tsx'], /"Signing in\.\.\."/);
+});
+
+test('ternary string arms: nested ternary edits the matching arm', () => {
+  const src = [
+    'export const B = ({ s }: { s: string }) => (',
+    '  <span>{s === "a" ? "Alpha" : s === "b" ? "Beta" : "Other"}</span>',
+    ');',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit({ 'c.tsx': src }, 'c.tsx', {
+    lineNumber: 2,
+    expr: '#ternary',
+    oldText: 'Beta',
+    newText: 'Bravo',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['c.tsx'], /"Bravo"/);
+  assert.match(after['c.tsx'], /"Alpha"/);
+});
+
+test('?? with string literal fallback: edits the literal when that is showing', () => {
+  const src = [
+    'const result = { n: null as string | null };',
+    'export const H = () => <p>{result.n ?? "—"}</p>;',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit({ 'c.tsx': src }, 'c.tsx', {
+    lineNumber: 2,
+    expr: 'result.n??#lit:—',
+    oldText: '—',
+    newText: 'N/A',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['c.tsx'], /\?\? "N\/A"/);
+});
+
+test('optional-chain member path resolves like a normal member', () => {
+  const src = [
+    'const jobs = [{ service: "plumbing" }, { service: "electrical" }];',
+    'export const L = () => jobs.map((job) => <h3>{job?.service}</h3>);',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit({ 'c.tsx': src }, 'c.tsx', {
+    lineNumber: 2,
+    expr: 'job.service',
+    oldText: 'electrical',
+    newText: 'HVAC',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['c.tsx'], /service: ["']HVAC["']/);
+  assert.match(after['c.tsx'], /service: ["']plumbing["']/);
+});

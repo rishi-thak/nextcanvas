@@ -35,12 +35,12 @@ export default function Home() {
           <div className="nav-links">
             <a className="hide-sm" href="#features">
               Features
-            </a>
+                                                                </a>
             <a className="hide-sm" href="#install">
               Install
-            </a>
-            <a className="hide-sm" href="#how">
-              How
+                                                                </a>
+            <a className="hide-sm" href="/docs">
+              Docs
                                                                 </a>
             <a href={GITHUB}>GitHub</a>
             <a className="btn btn-ghost" href="#install">
@@ -261,10 +261,10 @@ export default function Home() {
               stays out of your way and out of production.
             </p>
             <div className="hero-cta" style={{ marginBottom: 0 }}>
-              <a className="btn btn-primary btn-lg" href={GITHUB}>
+              <a className="btn btn-primary btn-lg" href="#install">
                 Get started
               </a>
-              <a className="btn btn-ghost btn-lg" href="#install">
+              <a className="btn btn-ghost btn-lg" href="/docs">
                 Read the docs
               </a>
             </div>
@@ -278,9 +278,9 @@ export default function Home() {
           <p>© 2026 nextcanvas · MIT licensed</p>
           <div className="footer-links">
             <a href={GITHUB}>GitHub</a>
+            <a href="/docs">Docs</a>
             <a href="#install">Install</a>
             <a href="#features">Features</a>
-            <a href="#how">How it works</a>
           </div>
         </div>
       </footer>

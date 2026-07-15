@@ -42,6 +42,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   immediate task, capture it here (or in memory if it's cross-project) so it
   survives the session.
 
+## Maintaining docs (STRICT — do it unprompted)
+
+- **When you add or change a user-facing feature, update `demo/app/docs/` in the
+  same turn** — how-to pages (`text`, `bound-text`, `attributes`, `styles`,
+  `toolbar`), the reference table (`what-works`), and Welcome if the feature is
+  a top-level capability. Do not wait to be asked.
+- Write for **operators using the overlay**, not for package internals (no SWC /
+  ts-morph / stamp implementation detail unless it changes what they can click).
+- Keep pages consistent: if a shape becomes editable, remove it from “won’t edit”
+  lists; if a shape is newly blocked, add it. Stale docs are a bug.
+- Docs live under the demo app (`/docs`); editing them is not a version-control
+  action — same gate as CLAUDE.md (commit only when explicitly asked).
+
 ## What this is
 
 `nextcanvas` is a drop-in dev tool that turns a locally-running **Next.js App
@@ -60,10 +73,12 @@ Fast Refresh then re-renders. Everything is dev-only and a no-op in production.
   to `nextcanvas/swc/nextcanvas_swc.wasm`, which is the **prebuilt artifact
   shipped in the package** (`files` includes `swc/`). Consumers need no Rust.
 - `demo/` — a throwaway **Next 16 / React 19** App Router app used only to test
-  the package. App code is `.tsx`; `next.config.js` stays JS. **Not** part of the
-  package's published `files`. It consumes the package via a `file:../nextcanvas`
-  dependency (npm symlinks it), resolving to `nextcanvas/dist/` + `swc/`.
+  the package (and host the public landing + `/docs` how-to). App code is
+  `.tsx`; `next.config.js` stays JS. **Not** part of the package's published
+  `files`. It consumes the package via a `file:../nextcanvas` dependency (npm
+  symlinks it), resolving to `nextcanvas/dist/` + `swc/`.
   `demo dev` runs `next dev --webpack` (see the bundler/OS matrix below for why).
+  Docs live at `demo/app/docs/*` — user-facing how-to (not package internals).
 
 ## Commands
 
@@ -192,16 +207,21 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   text, the plugin stamps an element whose *only* non-whitespace child is a single
   bound expression, emitting `data-nc-text-bound="<expr>"`:
   (1) a `{member.chain}` of plain identifiers (`{speaker.name}`, `{cfg.title}`);
-  (2) `{a ?? b}` / `{a || b}` of those same shapes (server value-matches each
-  side — covers `{s.name ?? s.role}`);
+  (2) `{a ?? b}` / `{a || b}` of those same shapes **or string-literal
+  fallbacks** (`{result.n ?? "—"}` stamps `path??#lit:—`);
+  (2b) `{cond ? "A" : "B"}` (nested ok) when every arm is a string literal —
+  stamped `#ternary`; server rewrites the arm matching `oldText`;
+  (2c) optional chaining `{job?.service}` treated like `{job.service}`;
   (3) a bare `{identifier}` that names either a `.map`/`.flatMap` element param
   (`truths.map((t) => <p>{t}</p>)`, via `map_params`) **or** a param of an
   enclosing capitalized component (`function Row({ q }) { … <span>{q}</span> }`,
   via `component_params`) — the server prop-drills to the call site
   (`q={f.q}` inside `faqs.map`). Reserved names (`children`, `className`, `key`,
-  `ref`, …) stay unstamped. Computed `{items[i].x}`, calls `{fn().y}`, and text
-  mixed with an expression (`Hi {name}`) stay unstamped. See the dedicated
-  bound-text subsection for prop-drill + filtered-collection fallback.
+  `ref`, …) stay unstamped. Inert siblings `{cond && <el/>}` next to a bound
+  expr are ignored for the sole-child check; a bound expr among other siblings
+  is wrapped in a stamped `<span>` (dangling wrap). Computed `{items[i].x}`,
+  calls `{fn().y}`, and text mixed with an expression (`Hi {name}`) stay
+  unstamped. See the dedicated bound-text subsection.
 - **`fiber._debugSource` is NOT available** in current Next App Router / React
   dev builds. Do not try to resolve source location from React internals — that
   is why source mapping uses the compile-time `data-loc` stamp.
