@@ -148,8 +148,10 @@ Pieces:
 
 - **`swc-plugin/src/lib.rs`** (Rust → `swc/nextcanvas_swc.wasm`) — the
   source-mapping mechanism. An **SWC plugin** that stamps
-  `data-loc="<absFile>:<line>:<col>"` onto every **host** (lowercase) JSX element
-  at compile time. Because it runs *inside* SWC, it works under both the webpack
+  `data-loc="<absFile>:<line>:<col>"` at compile time onto **host** (lowercase)
+  JSX elements **and plain-identifier components** (`<Reveal as="h2">…`, `<Link>…`)
+  — see the component-stamping constraint below for the forwarding caveat.
+  Because it runs *inside* SWC, it works under both the webpack
   (next-swc) and Turbopack pipelines — unlike a Babel plugin, which opts Next out
   of SWC. Injected via `experimental.swcPlugins` by `withCanvas` (no `.babelrc`).
 - **`src/overlay.ts`** — vanilla-DOM client (no React). Highlights text elements,
@@ -171,6 +173,20 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
 
 ## Non-obvious constraints (do not re-learn these the hard way)
 
+- **Components are stamped, but landing the stamp is best-effort.** The plugin
+  stamps plain-identifier **components** (capitalized, `<Reveal as="h2">…`,
+  `<Link>…`) as well as host elements, so text/attrs wrapped in a component can be
+  editable. But the stamp is passed as a React *prop* (`data-loc="…"`); it only
+  reaches the DOM if the component forwards unknown props to its root element
+  (`<Tag {...rest}>`) — which polymorphic wrappers (`Reveal`, `next/link`'s
+  `Link`) do. If a component swallows props, the stamp is an inert no-op and the
+  text stays uneditable (harmless, just not editable). If the component also
+  *transforms* its children (uppercases, wraps) the DOM text won't match the
+  source `oldText` and the write-back error-toasts. **Member/namespaced names
+  (`motion.div`, `Foo.Bar`, `ns:tag`) are still NOT stamped** — their forwarding
+  is less predictable; only a bare-`Ident` tag qualifies. A direct `{expression}`
+  child still disqualifies the element regardless (`<Reveal>{t}</Reveal>` is left
+  alone, same as `<h1>{title}</h1>`).
 - **`fiber._debugSource` is NOT available** in current Next App Router / React
   dev builds. Do not try to resolve source location from React internals — that
   is why source mapping uses the compile-time `data-loc` stamp.
@@ -324,10 +340,13 @@ Three edit kinds, all dev-only and written back through the :3131 server.
 **Text editing.** Static JSX text (`<h1>Hello</h1>`) **and** text mixed with
 inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
 surrounding text runs are editable and the inline elements are locked +
-preserved. Bound values (`<h1>{title}</h1>`) — any element with a direct
-`{expression}` child — are left unstamped and not editable. Repeated components
-sharing one source line (via `.map`) edit the shared source, affecting all
-instances.
+preserved. Text wrapped in a **plain-identifier component**
+(`<Reveal as="h2">Here's what we know:</Reveal>`, `<Link>Home</Link>`) is editable
+too, provided the component forwards props to its DOM root (see the
+component-stamping constraint above). Bound values (`<h1>{title}</h1>`) — any
+element with a direct `{expression}` child — are left unstamped and not editable.
+Repeated components sharing one source line (via `.map`) edit the shared source,
+affecting all instances.
 
 **Attribute editing.** Whitelisted JSX attributes (`src`, `href`, `alt`,
 `title`, `placeholder`, `aria-label`) via a hover chip + attribute panel, in two

@@ -1,7 +1,12 @@
 //! nextcanvas SWC plugin — the SWC-native source-location stamp.
 //!
-//! Stamps `data-loc="<absFile>:<line>:<col>"` onto host (lowercase) JSX elements
-//! the write-back server can edit — i.e. an element that has EITHER:
+//! Stamps `data-loc="<absFile>:<line>:<col>"` onto JSX elements the write-back
+//! server can edit. Both host (lowercase) elements and plain-identifier
+//! components (capitalized, e.g. `<Reveal as="h2">…</Reveal>`) are stamped: a
+//! host element always renders the stamped DOM node, while a component exposes
+//! the stamp only if it forwards unknown props to its root element
+//! (`<Tag {...rest}>`) — a best-effort no-op otherwise. An element qualifies
+//! when it has EITHER:
 //!   - one or more non-whitespace `JSXText` direct children (editable text),
 //!     whether plain (`<h1>Hello</h1>`) or mixed with inline child elements
 //!     (`<p>Hello <strong>world</strong>!</p>`, where the surrounding text runs
@@ -148,14 +153,18 @@ impl VisitMut for DataLocStamper {
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
         node.visit_mut_children_with(self);
 
-        // Only host (lowercase) elements render a DOM node; components (Foo)
-        // and member/namespaced names (Foo.Bar, ns:tag) are skipped.
-        let sym = match &node.opening.name {
-            JSXElementName::Ident(id) => id.sym.clone(),
-            _ => return,
-        };
-        match sym.chars().next() {
-            Some(c) if c.is_ascii_lowercase() => {}
+        // Stamp host (lowercase, e.g. `div`) elements AND plain-identifier
+        // components (capitalized, e.g. `Reveal`). A host element always renders
+        // its own DOM node, so the stamp lands unconditionally. A component only
+        // exposes the stamp in the DOM if it forwards unknown props to its root
+        // element (`<Tag {...rest}>`, which polymorphic wrappers like `Reveal`
+        // and `next/link`'s `<Link>` do) — when it does, `data-loc` reaches the
+        // DOM and the component's text/attrs become editable; when it doesn't,
+        // the extra prop is an inert no-op. Member/namespaced names (`Foo.Bar`,
+        // `motion.div`, `ns:tag`) are still skipped — their prop forwarding is
+        // less predictable and they aren't the reported case.
+        match &node.opening.name {
+            JSXElementName::Ident(_) => {}
             _ => return,
         }
 
