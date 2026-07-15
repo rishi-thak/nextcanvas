@@ -304,3 +304,148 @@ test('applyEdit rewrites literal text inside a plain-identifier component', () =
     'const x = <Reveal as="h2">What we learned</Reveal>;\n'
   );
 });
+
+test('applyEdit rewrites literal text on a motion.* member tag', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nextcanvas-bt-'));
+  const p = path.join(dir, 'c.tsx');
+  fs.writeFileSync(
+    p,
+    'export const H = () => <motion.h1>Generative AI rewires innovation</motion.h1>;\n'
+  );
+  const result = applyEdit({
+    fileName: p,
+    lineNumber: 1,
+    oldText: 'Generative AI rewires innovation',
+    newText: 'AI rewires innovation',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(fs.readFileSync(p, 'utf8'), /AI rewires innovation/);
+});
+
+// --- Nullish coalescing / logical-or bound text --------------------------------
+
+test('s.name ?? s.role: edits the matching left-side property by value', () => {
+  const src = [
+    'const SPEAKERS = [',
+    "  { name: 'Ada', role: 'Chair' },",
+    "  { name: 'Linus', role: 'Speaker' },",
+    '];',
+    'export const L = () => SPEAKERS.map((s) => <h3>{s.name ?? s.role}</h3>);',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit({ 'c.tsx': src }, 'c.tsx', {
+    lineNumber: 5,
+    expr: 's.name??s.role',
+    oldText: 'Linus',
+    newText: 'Linus Torvalds',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['c.tsx'], /name: 'Linus Torvalds'/);
+  assert.match(after['c.tsx'], /role: 'Speaker'/); // right side untouched
+});
+
+test('s.name ?? s.role: when left is absent, edits the right-side match', () => {
+  const src = [
+    'const SPEAKERS = [',
+    "  { role: 'Chair' },",
+    "  { role: 'Speaker' },",
+    '];',
+    'export const L = () => SPEAKERS.map((s) => <h3>{s.name ?? s.role}</h3>);',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit({ 'c.tsx': src }, 'c.tsx', {
+    lineNumber: 5,
+    expr: 's.name??s.role',
+    oldText: 'Speaker',
+    newText: 'Keynote',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['c.tsx'], /role: 'Keynote'/);
+  assert.match(after['c.tsx'], /role: 'Chair'/);
+});
+
+// --- Prop drill: FAQ-style bare prop + SessionCard-style member through prop ---
+
+test('prop-drill: bare {q} on Row resolves via q={f.q} inside faqs.map', () => {
+  const src = [
+    'const faqs = [',
+    "  { q: 'Who attends?', a: 'Leaders.' },",
+    "  { q: 'Where?', a: 'Hoboken.' },",
+    '];',
+    'function Row({ q, a }: { q: string; a: string }) {',
+    '  return <span>{q}</span>;',
+    '}',
+    'export const Faq = () => faqs.map((f) => <Row q={f.q} a={f.a} />);',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit({ 'c.tsx': src }, 'c.tsx', {
+    lineNumber: 6,
+    expr: 'q',
+    oldText: 'Who attends?',
+    newText: 'Who comes?',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['c.tsx'], /q: 'Who comes\?'/);
+  assert.match(after['c.tsx'], /q: 'Where\?'/);
+});
+
+test('prop-drill: SessionCard {session.title} via filtered visible.map falls back to AGENDA', () => {
+  const data = [
+    'export const AGENDA = [',
+    "  { id: '1', title: 'Keynote', description: 'Open' },",
+    "  { id: '2', title: 'Panel', description: 'Talk' },",
+    '];',
+    '',
+  ].join('\n');
+  const page = [
+    "import { AGENDA } from './agenda';",
+    'function SessionCard({ session }: { session: { title: string } }) {',
+    '  return <h3>{session.title}</h3>;',
+    '}',
+    'export function Agenda({ visible }: { visible: typeof AGENDA }) {',
+    '  return visible.map((session) => <SessionCard session={session} />);',
+    '}',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit(
+    { 'agenda.ts': data, 'page.tsx': page },
+    'page.tsx',
+    {
+      lineNumber: 3,
+      expr: 'session.title',
+      oldText: 'Panel',
+      newText: 'Roundtable',
+    }
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['agenda.ts'], /title: 'Roundtable'/);
+  assert.match(after['agenda.ts'], /title: 'Keynote'/);
+  assert.equal(after['page.tsx'], page);
+});
+
+test('Reveal-wrapped direct object (COUNCIL_COPY) edits the imported object', () => {
+  const data = [
+    "export const COUNCIL_COPY = { eyebrow: 'INDUSTRY COUNCIL', previewTitle: 'Who keeps the agenda honest.' };",
+    '',
+  ].join('\n');
+  const page = [
+    "import { COUNCIL_COPY } from './copy';",
+    'export const C = () => (',
+    '  <Reveal as="p">{COUNCIL_COPY.eyebrow}</Reveal>',
+    ');',
+    '',
+  ].join('\n');
+  const { result, after } = boundEdit(
+    { 'copy.ts': data, 'page.tsx': page },
+    'page.tsx',
+    {
+      lineNumber: 3,
+      expr: 'COUNCIL_COPY.eyebrow',
+      oldText: 'INDUSTRY COUNCIL',
+      newText: 'STEERING COUNCIL',
+    }
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.match(after['copy.ts'], /eyebrow: 'STEERING COUNCIL'/);
+  assert.equal(after['page.tsx'], page);
+});
