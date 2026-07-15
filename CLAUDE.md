@@ -248,6 +248,27 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   "just this one" edit is best-effort:** it's a one-way bound→literal transform
   (the identifier is gone from source), so reversing it can't restore `{GITHUB}`
   and may just error-toast — the forward edit is the supported path.
+- **Mapped-array bound text (`{t}` in a `.map`) IS editable; other bound text is
+  not.** The plugin stamps a host element whose *sole* child is a bare
+  `{identifier}` **only when that identifier is the element parameter of an
+  enclosing `.map`/`.flatMap` callback** (`truths.map((t, i) => <p>{t}</p>)`),
+  emitting `data-nc-text-bound="<name>"`. It tracks map-param scope with a stack
+  (`map_params`, pushed in `visit_mut_call_expr` around the callback descent, only
+  `param[0]` — the element, not the index `i`). The gate is deliberate: a bare
+  `{ident}` that's a **component prop** (`<pre>{children}</pre>`,
+  `<span>{file}</span>`) or an arbitrary const is left unstamped, because the
+  server can't resolve it to one editable string and the affordance would only
+  bounce. In the DOM `{t}` renders as a plain text node, so the overlay's normal
+  single-text dblclick path handles it; the only client change is flagging the
+  commit `boundText` (from `data-nc-text-bound`) so the server routes to
+  `applyBoundTextEdit`. That resolver **matches the mapped array's element by
+  value, not by index** (`findMappedArray` walks to the innermost binder, resolves
+  the array, rewrites the string literal whose value equals `oldText`) — so
+  editing one rendered instance changes only its own array entry, with no
+  DOM-index bookkeeping. Duplicate strings in the array → ambiguous, rejected.
+  (`applyBoundTextEdit` also has a shared-`const` fallback that rewrites the
+  variable declaration; the current plugin never stamps that shape, so it's a
+  dormant-but-harmless path, and the seam for broadening the stamp later.)
 - **Parse `data-loc` from the right** (`lastIndexOf(':')`) so Windows drive
   letters (`C:\...`) don't corrupt the split.
 - **Port is single-sourced via `NEXTCANVAS_PORT`.** `src/server.ts` derives
@@ -324,10 +345,14 @@ Three edit kinds, all dev-only and written back through the :3131 server.
 **Text editing.** Static JSX text (`<h1>Hello</h1>`) **and** text mixed with
 inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
 surrounding text runs are editable and the inline elements are locked +
-preserved. Bound values (`<h1>{title}</h1>`) — any element with a direct
-`{expression}` child — are left unstamped and not editable. Repeated components
-sharing one source line (via `.map`) edit the shared source, affecting all
-instances.
+preserved. **Mapped-array bound text** (`truths.map((t, i) => <p>{t}</p>)`) is
+also editable: the `.map` element param `{t}` is stamped `data-nc-text-bound` and
+the edit rewrites the matching array element by value (see the map-param
+constraint above). Other bound values — a component prop (`<pre>{children}</pre>`),
+an arbitrary const (`<h1>{title}</h1>`), or text mixed with an expression
+(`<p>Hi {name}</p>`) — are left unstamped and not editable. Repeated components
+sharing one source line via `.map` **that render static text** edit the shared
+source, affecting all instances (bound `{t}` is the per-element exception).
 
 **Attribute editing.** Whitelisted JSX attributes (`src`, `href`, `alt`,
 `title`, `placeholder`, `aria-label`) via a hover chip + attribute panel, in two

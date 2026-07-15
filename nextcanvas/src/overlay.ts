@@ -42,6 +42,10 @@ interface TextChange {
   before: string[];
   after: string[];
   mixed: boolean;
+  // Set when the element's sole child was a bare `{identifier}` (stamped
+  // `data-nc-text-bound`). The server resolves the identifier (shared const or
+  // `.map` param) instead of matching a literal text node. Always single-run.
+  boundText?: boolean;
 }
 
 // An attribute edit (src/href/alt/…); before/after are the attribute's string
@@ -178,6 +182,9 @@ whenBodyReady(function initNextCanvas(): void {
     attr?: string;
     oldRuns: string[];
     mixed: boolean;
+    // Set for a bound-text edit (`<p>{t}</p>`), so a manual-mode Save routes
+    // through the server's identifier-resolving path like autosave does.
+    boundText?: boolean;
     // Set for a bound-identifier attr, carrying the user's all/one choice so a
     // manual-mode Save writes it through the same bound path as autosave.
     bound?: boolean;
@@ -721,13 +728,19 @@ whenBodyReady(function initNextCanvas(): void {
     source: NextCanvasSource,
     from: string[],
     to: string[],
-    mixed: boolean
+    mixed: boolean,
+    boundText?: boolean
   ): Promise<{ ok: boolean; error?: string }> {
     const base = {
       fileName: source.fileName,
       lineNumber: source.lineNumber,
       columnNumber: source.columnNumber,
     };
+    // Bound text (`<p>{t}</p>`) is always a single run; flag it so the server
+    // resolves the identifier instead of matching a literal text node.
+    if (boundText) {
+      return postEdit({ ...base, oldText: from[0], newText: to[0], boundText: true });
+    }
     if (!mixed) {
       return postEdit({ ...base, oldText: from[0], newText: to[0] });
     }
@@ -768,12 +781,12 @@ whenBodyReady(function initNextCanvas(): void {
   function writeForward(c: EditChange): Promise<{ ok: boolean; error?: string }> {
     return c.kind === 'attr'
       ? writeAttr(c.source, c.attr, c.before, c.after, c.bound, c.scope)
-      : writeText(c.source, c.before, c.after, c.mixed);
+      : writeText(c.source, c.before, c.after, c.mixed, c.boundText);
   }
   function writeReverse(c: EditChange): Promise<{ ok: boolean; error?: string }> {
     return c.kind === 'attr'
       ? writeAttr(c.source, c.attr, c.after, c.before, c.bound, c.scope)
-      : writeText(c.source, c.after, c.before, c.mixed);
+      : writeText(c.source, c.after, c.before, c.mixed, c.boundText);
   }
   // Restore the change's element to one of its ends in the live DOM.
   function applyChangeDom(c: EditChange, to: 'before' | 'after'): void {
@@ -792,7 +805,7 @@ whenBodyReady(function initNextCanvas(): void {
       key,
       c.kind === 'attr'
         ? { el: c.el, source: c.source, kind: 'attr', attr: c.attr, oldRuns: [c.before], mixed: false, bound: c.bound, scope: c.scope }
-        : { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed }
+        : { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed, boundText: c.boundText }
     );
   }
 
@@ -946,7 +959,7 @@ whenBodyReady(function initNextCanvas(): void {
         jobs.push(() => writeAttr(s.source, attr, s.oldRuns[0], cur, bound, scope));
       } else {
         const cur = readRuns(s.el);
-        jobs.push(() => writeText(s.source, s.oldRuns, cur, s.mixed));
+        jobs.push(() => writeText(s.source, s.oldRuns, cur, s.mixed, s.boundText));
       }
     });
     if (jobs.length === 0) {
@@ -1619,7 +1632,10 @@ whenBodyReady(function initNextCanvas(): void {
           if (newText.trim() === '') el.textContent = oldText;
           return;
         }
-        commit({ kind: 'text', el, source, before: [oldText], after: [newText], mixed: false });
+        // A sole `{identifier}` child (`<p>{t}</p>`) renders as plain text, so it
+        // arrives here — flag it so the server resolves the identifier source.
+        const boundText = el.hasAttribute('data-nc-text-bound');
+        commit({ kind: 'text', el, source, before: [oldText], after: [newText], mixed: false, boundText });
         return;
       }
 

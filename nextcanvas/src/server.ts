@@ -36,6 +36,11 @@ interface Edit {
   // Mixed-children edit: one entry per non-whitespace text run of the element,
   // in source/DOM order. Present instead of oldText/newText.
   segments?: Segment[];
+  // When present, this is a bound-text edit: the element's sole child was a bare
+  // `{identifier}` (`<p>{t}</p>`), stamped by the plugin as `data-nc-text-bound`.
+  // oldText/newText carry the rendered text; the server resolves the identifier
+  // to its source (a shared `const`, or a `.map` callback param → the array).
+  boundText?: boolean;
   // When present, this is an attribute edit (e.g. src/href/alt) rather than a
   // JSX text edit; oldText/newText carry the attribute's string-literal value.
   attrName?: string;
@@ -94,6 +99,12 @@ export function applyEdit(edit: Edit): EditResult {
   });
 
   const sourceFile = project.addSourceFileAtPath(fileName);
+
+  // Bound-text edit (`<p>{t}</p>`): resolve the identifier to its source rather
+  // than looking for a literal JSXText node (there isn't one).
+  if (edit.boundText) {
+    return applyBoundTextEdit(edit, sourceFile);
+  }
 
   // Compare with internal whitespace collapsed: the browser hands us the
   // rendered textContent (runs of whitespace → a single space), while the JSX
@@ -230,6 +241,157 @@ export function applyEdit(edit: Edit): EditResult {
   target.replaceWithText(rewrap(target.getText(), String(newText)));
   sourceFile.saveSync();
 
+  return { ok: true, fileName, lineNumber, oldText: wanted, newText };
+}
+
+/**
+ * If `idName` is bound by an enclosing `<array>.map((idName, i) => …)` callback
+ * (or any iteration method that passes the element first — forEach/flatMap/…),
+ * return the mapped array's literal so the caller can rewrite one element.
+ * Handles `truths.map(...)` (resolve the array variable to its ArrayLiteral) and
+ * `[...].map(...)` (inline literal). Returns undefined when `idName` isn't such a
+ * parameter or the array can't be resolved to a local literal.
+ */
+function findMappedArray(
+  from: import('ts-morph').Node,
+  idName: string
+): import('ts-morph').ArrayLiteralExpression | undefined {
+  const { Node } = require('ts-morph') as typeof import('ts-morph');
+  let node: import('ts-morph').Node | undefined = from;
+  while (node) {
+    if (
+      (Node.isArrowFunction(node) || Node.isFunctionExpression(node)) &&
+      node.getParameters().some((p) => p.getName() === idName)
+    ) {
+      // Innermost binder of `idName`. It must be the callback argument of a
+      // `<array>.<method>(...)` call for the array-element rewrite to apply.
+      const parent = node.getParent();
+      if (parent && Node.isCallExpression(parent)) {
+        const callee = parent.getExpression();
+        if (Node.isPropertyAccessExpression(callee)) {
+          const obj = callee.getExpression();
+          if (Node.isArrayLiteralExpression(obj)) return obj;
+          if (Node.isIdentifier(obj)) {
+            const decl = from
+              .getSourceFile()
+              .getVariableDeclaration(obj.getText());
+            const init = decl?.getInitializer();
+            if (init && Node.isArrayLiteralExpression(init)) return init;
+          }
+        }
+      }
+      return undefined; // bound here, but not a resolvable mapped array
+    }
+    node = node.getParent();
+  }
+  return undefined;
+}
+
+/**
+ * Edit a bound-text element (`<h1>{title}</h1>`, `<p>{t}</p>`), stamped by the
+ * plugin as `data-nc-text-bound`. Its sole child is a bare `{identifier}`; we
+ * resolve that identifier to the source it renders:
+ *   - a `.map((t, i) => …)` callback parameter → rewrite the mapped array's
+ *     string-literal element whose value matches the edited text (index-free:
+ *     editing one instance changes only that array entry), OR
+ *   - a plain `const t = '…'` string variable → rewrite that declaration, which
+ *     changes every element referencing it (mirrors repeated `.map` static text).
+ *
+ * The element is located by tag line (the `data-loc` line), disambiguated by
+ * column when several elements open on the same line.
+ */
+export function applyBoundTextEdit(
+  edit: Edit,
+  sourceFile: import('ts-morph').SourceFile
+): EditResult {
+  const { SyntaxKind, Node } = require('ts-morph') as typeof import('ts-morph');
+  const { fileName, lineNumber, columnNumber, oldText, newText } = edit;
+  if (oldText == null) return { ok: false, error: 'missing oldText' };
+
+  const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
+  const wanted = norm(String(oldText));
+
+  const els = sourceFile
+    .getDescendantsOfKind(SyntaxKind.JsxElement)
+    .filter(
+      (el) => el.getOpeningElement().getStartLineNumber() === Number(lineNumber)
+    );
+  if (els.length === 0) {
+    return {
+      ok: false,
+      error: `Could not find an element at ${fileName}:${lineNumber} to edit.`,
+    };
+  }
+  let element = els[0];
+  if (els.length > 1 && columnNumber) {
+    const byCol = els.find(
+      (el) =>
+        sourceFile.getLineAndColumnAtPos(el.getOpeningElement().getStart())
+          .column === Number(columnNumber)
+    );
+    if (byCol) element = byCol;
+  }
+
+  // Its sole `{identifier}` child (the plugin only stamped this shape).
+  const exprChild = element
+    .getJsxChildren()
+    .find((c) => c.getKind() === SyntaxKind.JsxExpression);
+  const idNode =
+    exprChild && Node.isJsxExpression(exprChild)
+      ? exprChild.getExpression()
+      : undefined;
+  if (!idNode || !Node.isIdentifier(idNode)) {
+    return {
+      ok: false,
+      error: `No bound {identifier} child on the element at ${fileName}:${lineNumber}.`,
+    };
+  }
+  const idName = idNode.getText();
+
+  // Case 1: `.map` callback param → rewrite the matching array element.
+  const arrayLit = findMappedArray(element, idName);
+  if (arrayLit) {
+    const matches = arrayLit
+      .getElements()
+      .filter(
+        (e) => Node.isStringLiteral(e) && norm(e.getLiteralValue()) === wanted
+      );
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        error: `Could not find "${wanted}" in the mapped array (${fileName}). Reload and try again.`,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        error: `Ambiguous edit: "${wanted}" appears ${matches.length} times in the array; can't tell which to change.`,
+      };
+    }
+    (matches[0] as import('ts-morph').StringLiteral).setLiteralValue(
+      String(newText)
+    );
+    sourceFile.saveSync();
+    return { ok: true, fileName, lineNumber, oldText: wanted, newText };
+  }
+
+  // Case 2: a plain string `const` shared across references → rewrite the decl.
+  const decl = sourceFile.getVariableDeclaration(idName);
+  if (!decl) {
+    return {
+      ok: false,
+      error: `Could not resolve "${idName}" in ${fileName} — it may be imported from another module or bound to a non-string value.`,
+    };
+  }
+  const declInit = decl.getInitializer();
+  if (declInit == null || !Node.isStringLiteral(declInit)) {
+    return {
+      ok: false,
+      error: `"${idName}" is not a plain string literal, so it can't be edited safely.`,
+    };
+  }
+  declInit.setLiteralValue(String(newText));
+  sourceFile.saveSync();
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
 }
 
