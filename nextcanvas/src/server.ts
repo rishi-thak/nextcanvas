@@ -392,34 +392,85 @@ function applyBoundAttrEdit(
   return { ok: true, fileName, lineNumber, oldText, newText };
 }
 
+/** Nearest tsconfig.json at or above `fromFile`'s directory (for path aliases). */
+function findTsConfig(fromFile: string): string | undefined {
+  let dir = path.dirname(fromFile);
+  for (;;) {
+    const p = path.join(dir, 'tsconfig.json');
+    if (fs.existsSync(p)) return p;
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
 /**
- * Resolve a relative import specifier to a SourceFile in the project, adding it
- * on demand. Tries the specifier as-is, then with each common extension, then as
- * a directory `index.*`. Returns undefined for bare/aliased specifiers we can't
- * resolve without tsconfig paths (the caller reports a helpful error).
+ * Resolve a relative OR tsconfig-aliased import specifier to a SourceFile in the
+ * project, adding it on demand.
+ *
+ * A relative specifier is probed directly (as-is, then each common extension,
+ * then a directory `index.*`) — fast and dependency-free. Anything else (a bare
+ * or aliased specifier like `@/data/speakers`) is handed to the TypeScript
+ * compiler's own module resolution against the nearest tsconfig, so `baseUrl`,
+ * `paths`, and `extends` are honored exactly as the app sees them. Returns
+ * undefined when nothing resolves (the caller reports a helpful error).
  */
 function resolveModuleFile(
   spec: string,
   fromFile: string,
   project: import('ts-morph').Project
 ): import('ts-morph').SourceFile | undefined {
-  if (!spec.startsWith('.')) return undefined;
-  const base = path.resolve(path.dirname(fromFile), spec);
-  const exts = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
-  const candidates = [
-    ...exts.map((e) => base + e),
-    ...['index.ts', 'index.tsx', 'index.js', 'index.jsx'].map((f) =>
-      path.join(base, f)
-    ),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c) && fs.statSync(c).isFile()) {
-      return (
-        project.getSourceFile(c) ?? project.addSourceFileAtPathIfExists(c) ?? undefined
-      );
+  const add = (file: string): import('ts-morph').SourceFile | undefined =>
+    fs.existsSync(file) && fs.statSync(file).isFile()
+      ? project.getSourceFile(file) ??
+        project.addSourceFileAtPathIfExists(file) ??
+        undefined
+      : undefined;
+
+  if (spec.startsWith('.')) {
+    const base = path.resolve(path.dirname(fromFile), spec);
+    const exts = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+    const candidates = [
+      ...exts.map((e) => base + e),
+      ...['index.ts', 'index.tsx', 'index.js', 'index.jsx'].map((f) =>
+        path.join(base, f)
+      ),
+    ];
+    for (const c of candidates) {
+      const sf = add(c);
+      if (sf) return sf;
     }
+    return undefined;
   }
-  return undefined;
+
+  // Bare/aliased specifier: let the TS compiler resolve it against the app's
+  // tsconfig (baseUrl/paths/extends), so `@/data/speakers` → `<root>/data/…`.
+  const { ts } = require('ts-morph') as typeof import('ts-morph');
+  const tsconfigPath = findTsConfig(fromFile);
+  if (!tsconfigPath) return undefined;
+  const configFile = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+  if (configFile.error || !configFile.config) return undefined;
+  // A host that reads files (so `extends` resolves) but skips directory globbing
+  // (we only need compilerOptions, not the project's full file list).
+  const parseHost: import('typescript').ParseConfigHost = {
+    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    readDirectory: () => [],
+    fileExists: ts.sys.fileExists,
+    readFile: ts.sys.readFile,
+  };
+  const parsed = ts.parseJsonConfigFileContent(
+    configFile.config,
+    parseHost,
+    path.dirname(tsconfigPath)
+  );
+  const resolved = ts.resolveModuleName(
+    spec,
+    fromFile,
+    parsed.options,
+    ts.sys
+  );
+  const file = resolved.resolvedModule?.resolvedFileName;
+  return file ? add(file) : undefined;
 }
 
 /**

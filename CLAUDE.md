@@ -344,9 +344,12 @@ overlay sends the `.map` iteration index (its position among elements sharing th
 exact `data-loc`) so duplicate/empty values still resolve — **guarded by value**:
 the resolved property must still equal the edited text, else the edit is rejected
 as stale. The collection/object declaration may be **imported from another
-module** (resolved relatively, with `.ts/.tsx/.js/.jsx`/`index.*` fallbacks); the
-edit is written back to whichever file *owns* the declaration (often a data
-module, not the JSX file) — Fast Refresh still reflects it. Only a member chain
+module** — a relative specifier is probed directly (`.ts/.tsx/.js/.jsx`/`index.*`
+fallbacks), and a **tsconfig path alias** (`@/data/speakers`) is resolved via the
+TypeScript compiler against the app's nearest `tsconfig.json` (honoring
+`baseUrl`/`paths`/`extends`), in `resolveModuleFile`. The edit is written back to
+whichever file *owns* the declaration (often a data module, not the JSX file) —
+Fast Refresh still reflects it. Only a member chain
 of plain identifiers is stamped: a bare `{title}`, `{items[i].x}`, `{fn().y}`, or
 text mixed with an expression (`Hi {name}`) stays unstamped and not editable.
 

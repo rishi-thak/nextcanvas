@@ -1,4 +1,4 @@
-import { SPEAKERS, siteConfig } from './speakers';
+import { SPEAKERS, siteConfig } from '@/app/speakers';
 
 const GITHUB = 'https://github.com/rishi-thak/nextcanvas';
 
