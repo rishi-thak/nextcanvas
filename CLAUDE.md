@@ -173,6 +173,27 @@ version-control rules at the top of this file):
 Verify the run under the repo's **Actions** tab, then confirm on npm:
 `npm view @rishi-thak/nextcanvas version`.
 
+### Demo gotchas (landing page)
+
+- **Interactive controls in the demo look broken in dev — that's the overlay, not
+  the control.** With the Buttons toggle OFF (the default edit mode) nextcanvas
+  blocks `pointerdown`/`click` page-wide, so an `onClick` on the landing page
+  never fires. Verified with Playwright: the install-pill copy button copies
+  nothing in dev with Buttons off, and copies correctly with Buttons on **and** in
+  a production build (no overlay). Before "fixing" a dead control in the demo,
+  toggle Buttons ON or test against `next build && next start`.
+- **Do not set `turbopack.root` / `outputFileTracingRoot` in `demo/next.config.js`**
+  to silence the "multiple lockfiles" warning. Locally
+  `demo/node_modules/@rishi-thak/nextcanvas` is a symlink up to `../nextcanvas`;
+  pinning the root to `demo/` puts that target outside it and the build dies with
+  `Module not found: Can't resolve '@rishi-thak/nextcanvas'`. The warning is
+  local-only noise — on Vercel (root = `demo/`) there is no second lockfile.
+- **`npm install` in `demo/` may not replace that symlink.** The local package's
+  own version satisfies the published range (`^0.1.0`), so npm leaves the existing
+  symlink in place — meaning local dev can still be resolving `nextcanvas/dist/`
+  even though `package.json` names the published dep. Verify with
+  `ls -l demo/node_modules/@rishi-thak/nextcanvas` rather than trusting the range.
+
 ### Testing (browser round-trip)
 
 There is no unit-test suite. Verification is done by driving a real browser with

@@ -1,3 +1,5 @@
+import { InstallPill } from './InstallPill';
+
 const GITHUB = 'https://github.com/rishi-thak/nextcanvas';
 
 function CodeWindow({
@@ -71,11 +73,7 @@ export default function Home() {
               Star on GitHub
             </a>
           </div>
-          <div className="install-pill">
-            <span className="prompt">$</span>
-            <span>npm i -D @rishi-thak/nextcanvas</span>
-            <span className="copy">copy</span>
-          </div>
+          <InstallPill />
           <p
             style={{
               marginTop: 22,
@@ -83,9 +81,8 @@ export default function Home() {
               color: 'var(--faint)',
             }}
           >
-            Psst — this entire page is a live nextcanvas demo. Run it in dev and
-            double-click any headline to edit it.
-          </p>
+            BTW, this entire page is a live nextcanvas demo. You can temporarily edit things here with a similar UI, but run it in dev and double-click any headline to see how it actually works.
+                                                      </p>
         </div>
       </header>
 
