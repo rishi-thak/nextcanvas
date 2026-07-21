@@ -51,8 +51,12 @@ export default function ToolbarPage() {
                 <strong>Off</strong> (default)
               </td>
               <td>
-                Edit mode. Clicks don&apos;t navigate or fire app handlers.
-                Single-click selects for styles; double-click edits text.
+                Edit mode. Clicks and pointer-downs don&apos;t navigate or fire
+                app / Motion handlers — including Next <code>Link</code>s like a
+                CTA to another page. Single-click selects for styles;
+                double-click edits text. A small blocker installs as soon as the
+                overlay component mounts, so a fast click can&apos;t race the
+                overlay script download.
               </td>
             </tr>
             <tr>

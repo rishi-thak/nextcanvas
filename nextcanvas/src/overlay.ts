@@ -113,6 +113,15 @@ whenBodyReady(function initNextCanvas(): void {
   if (window.__nextCanvasLoaded) return;
   window.__nextCanvasLoaded = true;
 
+  // Drop the provisional blockers from <NextCanvasOverlay/> — we install the
+  // full UI-aware set below (same events, plus style-select on click).
+  try {
+    window.__nextCanvasBootCleanup?.();
+  } catch {
+    /* ignore */
+  }
+  window.__nextCanvasBootCleanup = undefined;
+
   const BASE = window.__NEXTCANVAS_SERVER__ || 'http://localhost:3131';
   const SERVER = BASE + '/edit';
   const STYLE_SERVER = BASE + '/style';
@@ -1510,25 +1519,56 @@ whenBodyReady(function initNextCanvas(): void {
   window.addEventListener('resize', drawSelOutline);
 
   // Click behavior depends on the "Buttons" toggle:
-  //  - Buttons OFF (edit mode, default): the page is inert — every non-UI click
-  //    is prevented AND its propagation stopped, so links don't navigate, in-page
-  //    anchors don't scroll, and the app's own onClick handlers don't fire. This
-  //    is what lets you single-click to select for styling and double-click to
-  //    edit text without the element navigating out from under you.
-  //  - Buttons ON (live mode): the overlay stays out of the way so the app behaves
-  //    normally; single-click does not select (use edit mode for that).
-  document.addEventListener(
+  //  - Buttons OFF (edit mode, default): the page is inert — every non-UI
+  //    pointer/mouse/click is prevented AND stopImmediatePropagation'd in the
+  //    capture phase on *window* (earliest target), so Next <Link> soft-nav,
+  //    in-page anchors, and Motion onTap / onClick handlers don't fire. click
+  //    alone is not enough: Motion listens on pointerdown; Link still needs
+  //    preventDefault on click to cancel the <a href> default.
+  //  - Buttons ON (live mode): the overlay stays out of the way so the app
+  //    behaves normally; single-click does not select (use edit mode for that).
+  // A matching provisional blocker is installed by <NextCanvasOverlay/> before
+  // this script loads, so a fast click can't race the network fetch.
+  function shouldBlockPageEvent(e: Event): boolean {
+    if (!enabled || buttonsEnabled) return false;
+    const el = e.target;
+    if (inUI(el)) return false;
+    if (el instanceof HTMLElement && el.isContentEditable) return false;
+    return true;
+  }
+
+  function blockPageInteraction(e: Event): void {
+    if (!shouldBlockPageEvent(e)) return;
+    // Don't preventDefault here — that can suppress the subsequent `click`
+    // (which we use for style selection). Stopping propagation is enough to
+    // keep React / Motion from seeing the gesture on the target.
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  }
+
+  // window capture runs before document/React root — kills Link + Motion early.
+  window.addEventListener('pointerdown', blockPageInteraction, true);
+  window.addEventListener('mousedown', blockPageInteraction, true);
+  window.addEventListener(
     'click',
     (e) => {
-      if (!enabled) return;
-      const el = e.target;
-      if (inUI(el)) return;
-      if (el instanceof HTMLElement && el.isContentEditable) return;
-      if (buttonsEnabled) return;
+      if (!shouldBlockPageEvent(e)) return;
       e.preventDefault();
       e.stopPropagation();
+      e.stopImmediatePropagation();
+      const el = e.target;
       if (isStylableEl(el)) selectEl(el);
       else deselect();
+    },
+    true
+  );
+  window.addEventListener(
+    'auxclick',
+    (e) => {
+      if (!shouldBlockPageEvent(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
     },
     true
   );
