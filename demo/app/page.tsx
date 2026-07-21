@@ -36,19 +36,11 @@ export default function Home() {
             <span>nextcanvas</span>
           </a>
           <div className="nav-links">
-            <a className="hide-sm" href="#features">
-              Features
-                                                                </a>
-            <a className="hide-sm" href="#install">
-              Install
-                                                                </a>
-            <a className="hide-sm" href="/docs">
-              Docs
-                                                                </a>
-            <a href={GITHUB}>GitHub</a>
-            <a className="btn btn-ghost" href="#install">
-              Get started
-            </a>
+            <a className="hide-sm" href="#features">features</a>
+            <a className="hide-sm" href="#install">install</a>
+            <a className="hide-sm" href="/docs">docs</a>
+            <a href={GITHUB}>github</a>
+            <a className="btn btn-ghost" href="#install">get started</a>
           </div>
         </div>
       </nav>
@@ -56,7 +48,7 @@ export default function Home() {
       {/* ---------------- Hero ---------------- */}
       <header className="hero">
         <div className="container">
-          <h1 className="hero-title">Edit your Next.js app right in the browser.</h1>
+          <h1 className="hero-title">edit your next.js app right in the browser.</h1>
           <p className="hero-sub">
             nextcanvas turns your locally-running app into an editable canvas. double-click any static text, type a new value, and it is written straight back into your source file. fast refresh does the rest.
                                                       </p>
@@ -86,17 +78,17 @@ export default function Home() {
         <div className="container split">
           <div>
             <p className="eyebrow">integration</p>
-            <h2 className="section-title">Two commands. Nothing to wire by hand.</h2>
+            <h2 className="section-title">two commands. nothing to wire by hand.</h2>
             <p className="section-sub">
-              Install it, run one command, and start editing. init wraps your next.config and mounts the overlay for you.
+              install it, run one command, and start editing. init wraps your next.config and mounts the overlay for you.
                                       </p>
             <div className="steps">
               <div className="step">
                 <span className="step-num">1</span>
                 <div>
-                  <h4>Install the package</h4>
+                  <h4>install the package</h4>
                   <p>
-                    Add it as a dev dependency. It ships prebuilt, so there is no
+                    add it as a dev dependency. it ships prebuilt, so there is no
                     build step on your end.
                   </p>
                 </div>
@@ -104,10 +96,10 @@ export default function Home() {
               <div className="step">
                 <span className="step-num">2</span>
                 <div>
-                  <h4>Run npx nextcanvas init</h4>
+                  <h4>run npx nextcanvas init</h4>
                   <p>
-                    It wraps your next.config with withCanvas and mounts the
-                    overlay in your root layout. Then run next dev.
+                    it wraps your next.config with withCanvas and mounts the
+                    overlay in your root layout. then run next dev.
                   </p>
                 </div>
               </div>
@@ -153,31 +145,31 @@ export default function Home() {
         <div className="container">
           <div className="section-head">
             <p className="eyebrow">how it works</p>
-            <h2 className="section-title">From double-click to source edit.</h2>
+            <h2 className="section-title">from double-click to source edit.</h2>
             <p className="section-sub">
-              A compile-time stamp maps every element back to its exact line of
-              source. The rest is a single round-trip.
+              a compile-time stamp maps every element back to its exact line of
+              source. the rest is a single round-trip.
             </p>
           </div>
           <div className="flow">
             <div className="flow-node">
               <div className="k">01 · click</div>
-              <p>Double-click text in the browser. The overlay reads the element data-loc stamp.</p>
+              <p>double-click text in the browser. the overlay reads the element data-loc stamp.</p>
             </div>
             <span className="flow-arrow">→</span>
             <div className="flow-node">
               <div className="k">02 · post</div>
-              <p>It POSTs the file, line, old and new text to the local write-back server.</p>
+              <p>it posts the file, line, old and new text to the local write-back server.</p>
             </div>
             <span className="flow-arrow">→</span>
             <div className="flow-node">
               <div className="k">03 · write</div>
-              <p>ts-morph does a formatting-preserving AST edit and saves your source file.</p>
+              <p>ts-morph does a formatting-preserving ast edit and saves your source file.</p>
             </div>
             <span className="flow-arrow">→</span>
             <div className="flow-node">
               <div className="k">04 · refresh</div>
-              <p>Next.js Fast Refresh re-renders instantly. No websocket, no reload.</p>
+              <p>next.js fast refresh re-renders instantly. no websocket, no reload.</p>
             </div>
           </div>
         </div>
@@ -188,55 +180,55 @@ export default function Home() {
         <div className="container">
           <div className="section-head">
             <p className="eyebrow">features</p>
-            <h2 className="section-title">Everything you need, nothing you do not.</h2>
+            <h2 className="section-title">everything you need, nothing you do not.</h2>
           </div>
           <div className="grid">
             <div className="card">
               <div className="ico">✎</div>
-              <h3>Double-click to edit</h3>
+              <h3>double-click to edit</h3>
               <p>
-                Any static text becomes editable inline. No side panels, no edit
+                any static text becomes editable inline. no side panels, no edit
                 mode to toggle — just click and type.
               </p>
             </div>
             <div className="card">
               <div className="ico">💾</div>
-              <h3>Written back to source</h3>
+              <h3>written back to source</h3>
               <p>
-                Edits land in your real .tsx file through a formatting-preserving
-                AST edit. Your code and style are untouched.
+                edits land in your real .tsx file through a formatting-preserving
+                ast edit. your code and style are untouched.
               </p>
             </div>
             <div className="card">
               <div className="ico">⚡</div>
-              <h3>Fast Refresh, instantly</h3>
+              <h3>fast refresh, instantly</h3>
               <p>
-                Edits are one-way POSTs; the browser update comes for free from
-                Next.js Fast Refresh. No socket to maintain.
+                edits are one-way posts; the browser update comes for free from
+                next.js fast refresh. no socket to maintain.
               </p>
             </div>
             <div className="card">
               <div className="ico">🦀</div>
-              <h3>SWC plugin, both bundlers</h3>
+              <h3>swc plugin, both bundlers</h3>
               <p>
-                The source stamp runs inside SWC, so webpack and Turbopack both
-                work. Zero extra config, next/font intact.
+                the source stamp runs inside swc, so webpack and turbopack both
+                work. zero extra config, next/font intact.
               </p>
             </div>
             <div className="card">
               <div className="ico">🌙</div>
-              <h3>Dev-only, zero prod cost</h3>
+              <h3>dev-only, zero prod cost</h3>
               <p>
-                Everything is gated to development and compiles out completely in
-                production builds. Ship with confidence.
+                everything is gated to development and compiles out completely in
+                production builds. ship with confidence.
               </p>
             </div>
             <div className="card">
               <div className="ico">🧩</div>
-              <h3>Robust across React</h3>
+              <h3>robust across react</h3>
               <p>
-                Elements are mapped to source at compile time, not from fragile
-                React internals. It just keeps working.
+                elements are mapped to source at compile time, not from fragile
+                react internals. it just keeps working.
               </p>
             </div>
           </div>
@@ -247,18 +239,14 @@ export default function Home() {
       <section>
         <div className="container">
           <div className="cta">
-            <h2>Drop it into your Next.js app.</h2>
+            <h2>drop it into your next.js app.</h2>
             <p>
-              Install once, edit forever. nextcanvas is a dev dependency that
+              install once, edit forever. nextcanvas is a dev dependency that
               stays out of your way and out of production.
             </p>
             <div className="hero-cta" style={{ marginBottom: 0 }}>
-              <a className="btn btn-primary btn-lg" href="#install">
-                Get started
-              </a>
-              <a className="btn btn-ghost btn-lg" href="/docs">
-                Read the docs
-              </a>
+              <a className="btn btn-primary btn-lg" href="#install">get started</a>
+              <a className="btn btn-ghost btn-lg" href="/docs">read the docs</a>
             </div>
           </div>
         </div>
@@ -267,12 +255,12 @@ export default function Home() {
       {/* ---------------- Footer ---------------- */}
       <footer className="footer">
         <div className="container footer-inner">
-          <p>© 2026 nextcanvas · MIT licensed</p>
+          <p>© 2026 nextcanvas · mit licensed</p>
           <div className="footer-links">
-            <a href={GITHUB}>GitHub</a>
-            <a href="/docs">Docs</a>
-            <a href="#install">Install</a>
-            <a href="#features">Features</a>
+            <a href={GITHUB}>github</a>
+            <a href="/docs">docs</a>
+            <a href="#install">install</a>
+            <a href="#features">features</a>
           </div>
           <ThemeToggle />
         </div>

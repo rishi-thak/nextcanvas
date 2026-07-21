@@ -5,8 +5,8 @@ import { useEffect, useState } from 'react';
 type Theme = 'light' | 'dark';
 
 const OPTIONS: { value: Theme; label: string }[] = [
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
+  { value: 'light', label: 'light' },
+  { value: 'dark', label: 'dark' },
 ];
 
 function SunIcon() {
@@ -59,7 +59,7 @@ export function ThemeToggle() {
   }
 
   return (
-    <div className="theme-pill" role="group" aria-label="Colour theme">
+    <div className="theme-pill" role="group" aria-label="Color theme">
       {OPTIONS.map((opt) => (
         <button
           key={opt.value}
