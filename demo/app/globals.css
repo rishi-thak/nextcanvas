@@ -1,4 +1,58 @@
+/* ---------- Theme ----------
+   Light is the default; dark is opt-in via [data-theme="dark"] on <html>.
+
+   The two themes are built by ROLE, not by inverting values. In dark, a raised
+   surface is *lighter* than the page (--bg-soft > --bg) and borders are white at
+   low alpha. In light, the page is faintly tinted and a raised surface is pure
+   white, with real ink-tinted hairlines — inverting the dark values instead
+   would give muddy grey panels that read as disabled. Anything that can't be
+   expressed as a shared token (the nav scrim, the dot grid, the primary button)
+   gets its own token per theme rather than a hardcoded colour. */
 :root {
+  --bg: #fbfafd;
+  --bg-soft: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f3f0f9;
+  --border: rgba(23, 20, 38, 0.1);
+  --border-strong: rgba(23, 20, 38, 0.18);
+  --text: #16141f;
+  --muted: #56516b;
+  /* 4.95:1 on --bg — footer copy and captions are body-size, so this has to
+     clear AA rather than sit at a decorative grey. */
+  --faint: #6f6a85;
+  --accent: #7c3aed;
+  --accent-2: #6d28d9;
+  --accent-3: #6d28d9;
+
+  --nav-bg: rgba(251, 250, 253, 0.72);
+  /* Faintly violet dot grid, so the paper relates to the accent. */
+  --dot-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle cx='1' cy='1' r='1' fill='%236d28d9' fill-opacity='0.1'/%3E%3C/svg%3E");
+  /* On light, a white primary button would vanish into the page — it becomes
+     the accent fill instead. */
+  --btn-primary-bg: var(--accent);
+  --btn-primary-fg: #ffffff;
+  --btn-primary-bg-hover: var(--accent-2);
+  --btn-ghost-hover: #e9e3f7;
+  --brand-glow: 0 6px 18px rgba(124, 58, 237, 0.28);
+  --brand-inset: 0 0 0 1px rgba(255, 255, 255, 0.22) inset;
+  --window-shadow: 0 30px 70px -32px rgba(31, 16, 66, 0.45);
+  --link-underline: rgba(109, 40, 217, 0.35);
+  --code-inline-fg: #5b21b6;
+  --code-inline-bg: rgba(139, 92, 246, 0.1);
+  --code-inline-bd: rgba(139, 92, 246, 0.22);
+  --rule-ok-bd: rgba(5, 150, 105, 0.3);
+  --rule-ok-bg: rgba(5, 150, 105, 0.07);
+  --rule-warn-bd: rgba(180, 120, 10, 0.32);
+  --rule-warn-bg: rgba(180, 120, 10, 0.08);
+
+  --radius: 14px;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
   --bg: #07070a;
   --bg-soft: #0c0c12;
   --panel: rgba(255, 255, 255, 0.025);
@@ -7,13 +61,32 @@
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f5f5f7;
   --muted: #a2a2b4;
-  --faint: #6c6c7e;
+  /* Nudged up from #6c6c7e (3.9:1) to clear AA at body size, matching the light
+     theme's --faint. */
+  --faint: #7d7d90;
   --accent: #8b5cf6;
   --accent-2: #6d28d9;
   --accent-3: #a78bfa;
-  --radius: 14px;
-  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --nav-bg: rgba(7, 7, 10, 0.6);
+  --dot-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle cx='1' cy='1' r='1' fill='%23ffffff' fill-opacity='0.05'/%3E%3C/svg%3E");
+  --btn-primary-bg: #ffffff;
+  --btn-primary-fg: #0a0a0a;
+  --btn-primary-bg-hover: #e9e9ee;
+  --btn-ghost-hover: rgba(255, 255, 255, 0.08);
+  --brand-glow: 0 6px 18px rgba(124, 58, 237, 0.45);
+  --brand-inset: 0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+  --window-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8);
+  --link-underline: rgba(167, 139, 250, 0.35);
+  --code-inline-fg: #d4c4ff;
+  --code-inline-bg: rgba(139, 92, 246, 0.12);
+  --code-inline-bd: rgba(139, 92, 246, 0.22);
+  --rule-ok-bd: rgba(52, 211, 153, 0.28);
+  --rule-ok-bg: rgba(52, 211, 153, 0.06);
+  --rule-warn-bd: rgba(251, 191, 36, 0.28);
+  --rule-warn-bg: rgba(251, 191, 36, 0.06);
+
+  color-scheme: dark;
 }
 
 * {
@@ -34,6 +107,11 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow-x: hidden;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+::selection {
+  background: rgba(124, 58, 237, 0.24);
 }
 
 /* Ambient background: subtle dotted grid via inline SVG (no gradients) */
@@ -42,7 +120,7 @@ body::before {
   position: fixed;
   inset: 0;
   z-index: -2;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle cx='1' cy='1' r='1' fill='%23ffffff' fill-opacity='0.05'/%3E%3C/svg%3E");
+  background-image: var(--dot-img);
   opacity: 0.5;
 }
 
@@ -64,7 +142,7 @@ a {
   top: 0;
   z-index: 100;
   backdrop-filter: saturate(160%) blur(12px);
-  background: rgba(7, 7, 10, 0.6);
+  background: var(--nav-bg);
   border-bottom: 1px solid var(--border);
 }
 .nav-inner {
@@ -86,7 +164,7 @@ a {
   height: 26px;
   border-radius: 7px;
   background: var(--accent-2);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset, 0 6px 18px rgba(124, 58, 237, 0.45);
+  box-shadow: var(--brand-inset), var(--brand-glow);
   display: grid;
   place-items: center;
   font-size: 14px;
@@ -124,11 +202,11 @@ a {
   transform: translateY(-1px);
 }
 .btn-primary {
-  background: #fff;
-  color: #0a0a0a;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
 }
 .btn-primary:hover {
-  background: #e9e9ee;
+  background: var(--btn-primary-bg-hover);
 }
 .btn-ghost {
   background: var(--panel-2);
@@ -136,7 +214,7 @@ a {
   border-color: var(--border-strong);
 }
 .btn-ghost:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--btn-ghost-hover);
 }
 .btn-lg {
   padding: 13px 24px;
@@ -148,25 +226,6 @@ a {
 .hero {
   padding: 96px 0 64px;
   text-align: center;
-}
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--muted);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  padding: 6px 14px;
-  border-radius: 999px;
-  margin-bottom: 28px;
-}
-.badge .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #34d399;
-  box-shadow: 0 0 10px #34d399;
 }
 h1.hero-title {
   font-size: clamp(40px, 6.5vw, 76px);
@@ -263,20 +322,24 @@ h2.section-title {
   margin-bottom: 44px;
 }
 
-/* ---------- Code window ---------- */
+/* ---------- Code window ----------
+   Deliberately dark in BOTH themes: a terminal and a config file are dark
+   artifacts, and the slab anchors the light page so it doesn't wash out. Because
+   the surface never flips, everything inside must use fixed values — a themed
+   --border here would paint a dark hairline on a dark window in light mode. */
 .window {
   background: #0b0b11;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--radius);
   overflow: hidden;
-  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8);
+  box-shadow: var(--window-shadow);
 }
 .window-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.015);
 }
 .window-bar .lights {
@@ -292,7 +355,7 @@ h2.section-title {
 .window-bar .fname {
   font-family: var(--mono);
   font-size: 12.5px;
-  color: var(--faint);
+  color: #7c7c8f;
   margin-left: 8px;
 }
 pre.code {
@@ -319,13 +382,15 @@ pre.code .fn {
   color: #8b5cf6;
 }
 pre.code .prompt {
-  color: var(--accent-3);
+  color: #a78bfa;
 }
 
 /* ---------- Split (copy + code) ---------- */
 .split {
   display: grid;
-  grid-template-columns: 1fr 1.1fr;
+  /* minmax(0, …) not 1fr: a bare 1fr track refuses to shrink below the code
+     window's min-content width, which pushed the page sideways on mobile. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
   gap: 56px;
   align-items: center;
 }
@@ -483,10 +548,63 @@ pre.code .prompt {
   color: var(--text);
 }
 
+/* ---------- Theme switch ---------- */
+.theme-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.theme-pill-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 7px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.theme-pill-opt:hover {
+  color: var(--muted);
+}
+/* The selected option is the raised one — white on light, lifted on dark, the
+   same elevation rule the rest of the page follows. */
+.theme-pill-opt[data-active='true'] {
+  background: var(--bg-soft);
+  border-color: var(--border);
+  color: var(--text);
+}
+.theme-pill-opt:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.theme-pill-opt svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+/* The moon reads better as a solid shape at this size. */
+.theme-pill-opt svg path[d^='M13.4'] {
+  fill: currentColor;
+  stroke: none;
+}
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .split {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 32px;
   }
   .grid {
@@ -497,5 +615,17 @@ pre.code .prompt {
   }
   .flow-arrow {
     transform: rotate(90deg);
+  }
+}
+
+/* Respect a reduced-motion preference: the theme cross-fade, hover lifts, and
+   the switch's colour transitions all become instant. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

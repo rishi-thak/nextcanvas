@@ -9,7 +9,7 @@
   top: 0;
   z-index: 40;
   backdrop-filter: saturate(160%) blur(12px);
-  background: rgba(7, 7, 10, 0.72);
+  background: var(--nav-bg);
   border-bottom: 1px solid var(--border);
 }
 
@@ -208,7 +208,7 @@
   color: var(--accent-3);
   text-decoration: underline;
   text-underline-offset: 3px;
-  text-decoration-color: rgba(167, 139, 250, 0.35);
+  text-decoration-color: var(--link-underline);
 }
 
 .docs-main a:not(.docs-card):not(.btn):hover {
@@ -218,18 +218,20 @@
 .docs-main code {
   font-family: var(--mono);
   font-size: 0.86em;
-  color: #d4c4ff;
-  background: rgba(139, 92, 246, 0.12);
-  border: 1px solid rgba(139, 92, 246, 0.22);
+  color: var(--code-inline-fg);
+  background: var(--code-inline-bg);
+  border: 1px solid var(--code-inline-bd);
   padding: 1px 6px;
   border-radius: 5px;
 }
 
+/* Dark in both themes, matching the landing code windows — so its hairline must
+   be a fixed white alpha, not the themed --border (which is dark ink on light). */
 .docs-main pre {
   margin: 0 0 20px;
   padding: 16px 18px;
   background: #0b0b11;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
   overflow-x: auto;
   font-family: var(--mono);
@@ -300,13 +302,13 @@
 }
 
 .docs-callout.tip {
-  border-color: rgba(52, 211, 153, 0.28);
-  background: rgba(52, 211, 153, 0.06);
+  border-color: var(--rule-ok-bd);
+  background: var(--rule-ok-bg);
 }
 
 .docs-callout.warn {
-  border-color: rgba(251, 191, 36, 0.28);
-  background: rgba(251, 191, 36, 0.06);
+  border-color: var(--rule-warn-bd);
+  background: var(--rule-warn-bg);
 }
 
 .docs-kbd {
@@ -474,4 +476,25 @@
   .docs-top-links a:not(.docs-top-cta) {
     display: none;
   }
+}
+
+/* ---------- Docs footer ---------- */
+.docs-footer {
+  border-top: 1px solid var(--border);
+  padding: 28px 0;
+  margin-top: 48px;
+}
+.docs-footer-inner {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.docs-footer-inner p {
+  color: var(--faint);
+  font-size: 13.5px;
 }

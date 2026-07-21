@@ -1,4 +1,5 @@
 import { InstallPill } from './InstallPill';
+import { ThemeToggle } from './ThemeToggle';
 
 const GITHUB = 'https://github.com/rishi-thak/nextcanvas';
 
@@ -55,23 +56,17 @@ export default function Home() {
       {/* ---------------- Hero ---------------- */}
       <header className="hero">
         <div className="container">
-          <span className="badge">
-            <span className="dot" />
-            Dev-only · Next.js App Router
-          </span>
           <h1 className="hero-title">Edit your Next.js app right in the browser.</h1>
           <p className="hero-sub">
-            nextcanvas turns your locally-running app into an editable canvas.
-            Double-click any static text, type a new value, and it is written
-            straight back into your source file. Fast Refresh does the rest.
-          </p>
+            nextcanvas turns your locally-running app into an editable canvas. double-click any static text, type a new value, and it is written straight back into your source file. fast refresh does the rest.
+                                                      </p>
           <div className="hero-cta">
             <a className="btn btn-primary btn-lg" href="#install">
-              Get started
-            </a>
+              get started
+                                      </a>
             <a className="btn btn-ghost btn-lg" href={GITHUB}>
-              Star on GitHub
-            </a>
+              star on github
+                                      </a>
           </div>
           <InstallPill />
           <p
@@ -81,8 +76,8 @@ export default function Home() {
               color: 'var(--faint)',
             }}
           >
-            BTW, this entire page is a live nextcanvas demo. You can temporarily edit things here with a similar UI, but follow the steps below to see it work on your own project!
-                                                                            </p>
+            fyi, this entire page is a live nextcanvas demo. you can temporarily edit things here with a similar ui, but follow the steps below to see it work on your own project!
+                                                                                                                                              </p>
         </div>
       </header>
 
@@ -279,6 +274,7 @@ export default function Home() {
             <a href="#install">Install</a>
             <a href="#features">Features</a>
           </div>
+          <ThemeToggle />
         </div>
       </footer>
     </>
