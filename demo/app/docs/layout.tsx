@@ -3,6 +3,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { GITHUB } from './nav';
 import { DocsSideNav } from './DocsSideNav';
+import { ThemeToggle } from '../ThemeToggle';
 import './docs.css';
 
 export const metadata: Metadata = {
@@ -42,6 +43,14 @@ export default function DocsLayout({ children }: { children: ReactNode }) {
 
         <main className="docs-main">{children}</main>
       </div>
+
+      {/* Docs had no footer, which left no way to switch theme while reading. */}
+      <footer className="docs-footer">
+        <div className="docs-footer-inner">
+          <p>© 2026 nextcanvas · MIT licensed</p>
+          <ThemeToggle />
+        </div>
+      </footer>
     </div>
   );
 }
