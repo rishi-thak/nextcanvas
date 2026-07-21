@@ -372,6 +372,23 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   and may just error-toast — the forward edit is the supported path.
 - **Parse `data-loc` from the right** (`lastIndexOf(':')`) so Windows drive
   letters (`C:\...`) don't corrupt the split.
+- **EADDRINUSE on the edit port is NOT terminal — `startServer` must keep
+  retrying.** `withCanvas` binds :3131 at *config-load* time, and the process
+  already holding the port may be on its way out (a previous `next dev` shutting
+  down, or a process that binds and only then bails — Next logs
+  `[nextcanvas] edit server listening` immediately followed by `⨯ Another next dev
+  server is already running`). The original code treated the first EADDRINUSE as
+  "another worker owns it; fine" and never rebound, which stranded users: **Next
+  dev kept running normally while no edit server existed at all.** Symptoms —
+  every edit toasts "Could not reach the nextcanvas server", and the toolbar
+  *disappears* on the next reload because `<script src=:3131/overlay.js>` can no
+  longer load. Only a full dev restart recovered it, and even that lost the race
+  sometimes. Fix: an unref'd `setInterval` watchdog (`REBIND_INTERVAL_MS`, 2s)
+  re-attempts `listen` whenever we're not listening, with a `binding` guard so a
+  bind in flight isn't double-started. Whoever owns the port keeps it; if that
+  owner dies, the next tick takes over (verified: sibling worker takes over ~2s
+  after the owner is killed, and the idle worker logs nothing in the meantime).
+  Do not "simplify" this back to a single `listen` call.
 - **Port is single-sourced via `NEXTCANVAS_PORT`.** `src/server.ts` derives
   `PORT` from it; `withCanvas` inlines that same value into the client (`env`),
   and `<NextCanvasOverlay/>` publishes it as `window.__NEXTCANVAS_SERVER__` so the

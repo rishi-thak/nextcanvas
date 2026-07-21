@@ -1219,23 +1219,58 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
-/** Boot the edit server once per process. Safe to call repeatedly. */
+/** How often to re-attempt the bind while the port is held by someone else. */
+const REBIND_INTERVAL_MS = 2000;
+
+/**
+ * Boot the edit server once per process. Safe to call repeatedly.
+ *
+ * EADDRINUSE is NOT terminal. `withCanvas` calls this at config-load time, and
+ * the process holding the port may be on its way out — a previous `next dev`
+ * shutting down, or a short-lived process that binds and then exits (Next can
+ * load the config, bind, and only afterwards decide to bail, e.g. "Another next
+ * dev server is already running"). Giving up on the first EADDRINUSE left Next
+ * dev running happily with no edit server behind it: every edit then toasted
+ * "Could not reach the nextcanvas server", the overlay script 404'd on the next
+ * reload so the toolbar vanished, and only a full dev restart recovered it.
+ *
+ * So we keep a low-frequency watchdog that re-attempts the bind whenever we are
+ * not listening. Whoever currently owns the port keeps it; if that owner dies,
+ * the next tick takes over. The timer is unref'd, so it never holds the process
+ * open on its own.
+ */
 export function startServer(): http.Server {
   if (global.__nextCanvasServer) return global.__nextCanvasServer;
 
   const server = http.createServer(handler);
-  server.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE') {
-      // Another dev worker already booted it; that's fine.
-      return;
-    }
-    console.error('[nextcanvas] server error:', err);
-  });
-  server.listen(PORT, () => {
+  let binding = false;
+
+  const tryBind = (): void => {
+    if (server.listening || binding) return;
+    binding = true;
+    server.listen(PORT);
+  };
+
+  server.on('listening', () => {
+    binding = false;
     console.log(
       `[nextcanvas] edit server listening on http://localhost:${PORT}`
     );
   });
+
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    binding = false;
+    if (err.code === 'EADDRINUSE') {
+      // Someone else holds it right now — maybe a sibling dev worker, maybe a
+      // process that is about to exit. Stay quiet; the watchdog retries.
+      return;
+    }
+    console.error('[nextcanvas] server error:', err);
+  });
+
+  tryBind();
+  const watchdog = setInterval(tryBind, REBIND_INTERVAL_MS);
+  watchdog.unref();
 
   global.__nextCanvasServer = server;
   return server;
