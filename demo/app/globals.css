@@ -45,6 +45,16 @@
   --rule-warn-bd: rgba(180, 120, 10, 0.32);
   --rule-warn-bg: rgba(180, 120, 10, 0.08);
 
+  /* Setup pill (hero primary). Deliberately the SAME violet in both themes:
+     white-on-#7c3aed is 5.7:1, while the dark theme's lighter --accent (#8b5cf6)
+     would only reach 3.9:1 behind 14px text and fail AA. */
+  --pill-bg: #7c3aed;
+  --pill-fg: #ffffff;
+  --pill-track: rgba(255, 255, 255, 0.18);
+  --pill-tab-idle: rgba(255, 255, 255, 0.85);
+  --pill-tab-active-bg: #ffffff;
+  --pill-tab-active-fg: #6d28d9;
+
   --radius: 14px;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -85,6 +95,13 @@
   --rule-ok-bg: rgba(52, 211, 153, 0.06);
   --rule-warn-bd: rgba(251, 191, 36, 0.28);
   --rule-warn-bg: rgba(251, 191, 36, 0.06);
+
+  --pill-bg: #7c3aed;
+  --pill-fg: #ffffff;
+  --pill-track: rgba(255, 255, 255, 0.18);
+  --pill-tab-idle: rgba(255, 255, 255, 0.85);
+  --pill-tab-active-bg: #ffffff;
+  --pill-tab-active-fg: #6d28d9;
 
   color-scheme: dark;
 }
@@ -249,20 +266,35 @@ h1.hero-title {
   flex-wrap: wrap;
   margin-bottom: 28px;
 }
-/* ---------- Setup control (copy prompt + method tabs) ---------- */
-.setup {
-  display: inline-flex;
-  flex-direction: column;
+/* ---------- Setup control (copy prompt + method tabs) ----------
+   This is the hero's PRIMARY action, so it carries the accent fill. The pill and
+   the ghost button sit on one row with the hint centred beneath both — `.setup`
+   is display:contents so its two children become grid items of .hero-actions
+   directly, which is what lets the hint span its own row. */
+.hero-actions {
+  display: grid;
+  grid-template-areas: "pill github" "hint hint";
+  grid-template-columns: auto auto;
+  justify-content: center;
   align-items: center;
-  gap: 10px;
+  column-gap: 14px;
+  row-gap: 12px;
+  margin-bottom: 28px;
+}
+.hero-actions .btn {
+  grid-area: github;
+}
+.setup {
+  display: contents;
 }
 .setup-bar {
+  grid-area: pill;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 5px;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
+  background: var(--pill-bg);
+  border: 1px solid transparent;
   border-radius: 999px;
 }
 .setup-copy {
@@ -276,13 +308,10 @@ h1.hero-title {
   padding: 10px 16px;
   border: 1px solid transparent;
   border-radius: 999px;
-  /* Deliberately NOT the accent fill: "get started" is the hero's primary
-     action, and a second violet button beside it flattens the hierarchy. This
-     reads as the label of the control it sits in. */
   background: none;
-  color: var(--text);
+  color: var(--pill-fg);
   cursor: pointer;
-  transition: color 0.15s ease;
+  transition: opacity 0.15s ease;
   /* Sized to the longest label ("copy commands") so neither switching tabs nor
      swapping to "copied" resizes the bar and jogs the tabs sideways. */
   min-width: 168px;
@@ -290,7 +319,7 @@ h1.hero-title {
   user-select: none;
 }
 .setup-copy:hover {
-  color: var(--accent-3);
+  opacity: 0.82;
 }
 .setup-copy svg {
   width: 14px;
@@ -305,7 +334,7 @@ h1.hero-title {
   align-items: center;
   gap: 2px;
   padding: 3px;
-  background: var(--panel-2);
+  background: var(--pill-track);
   border-radius: 999px;
 }
 .setup-tab {
@@ -317,28 +346,38 @@ h1.hero-title {
   border: 1px solid transparent;
   border-radius: 999px;
   background: none;
-  color: var(--faint);
+  color: var(--pill-tab-idle);
   cursor: pointer;
   transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 .setup-tab:hover {
-  color: var(--muted);
+  color: var(--pill-fg);
 }
 .setup-tab[data-active='true'] {
-  background: var(--bg-soft);
-  border-color: var(--border);
-  color: var(--text);
+  background: var(--pill-tab-active-bg);
+  border-color: transparent;
+  color: var(--pill-tab-active-fg);
 }
 .setup-copy:focus-visible,
 .setup-tab:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--pill-fg);
   outline-offset: 2px;
 }
 .setup-hint {
+  grid-area: hint;
   font-family: var(--mono);
   font-size: 12.5px;
   color: var(--faint);
   margin: 0;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .hero-actions {
+    grid-template-areas: "pill" "hint" "github";
+    grid-template-columns: auto;
+    justify-items: center;
+  }
 }
 
 /* ---------- Section scaffolding ---------- */
@@ -682,8 +721,10 @@ pre.code .prompt {
    Sits bottom-left; the nextcanvas toolbar owns bottom-right. */
 .demo-notice {
   position: fixed;
-  left: 20px;
-  bottom: 20px;
+  /* Sits directly above the nextcanvas toolbar (.nc-root: right 16, bottom 16,
+     44px tall) and points down at it, since the copy says to flip its switch. */
+  right: 16px;
+  bottom: 72px;
   z-index: 2147483000;
   max-width: 310px;
   padding: 16px 18px;
@@ -691,6 +732,19 @@ pre.code .prompt {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   box-shadow: 0 20px 50px -24px rgba(31, 16, 66, 0.5);
+}
+/* Tail: a rotated square borrowing two borders, so it reads as part of the card. */
+.demo-notice::after {
+  content: "";
+  position: absolute;
+  right: 44px;
+  bottom: -7px;
+  width: 13px;
+  height: 13px;
+  background: var(--bg-soft);
+  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  transform: rotate(45deg);
 }
 .demo-notice p {
   font-size: 13px;
@@ -725,7 +779,7 @@ pre.code .prompt {
   .demo-notice {
     left: 12px;
     right: 12px;
-    bottom: 12px;
+    bottom: 72px;
     max-width: none;
   }
 }
