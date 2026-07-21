@@ -51,6 +51,12 @@ interface Edit {
   textBound?: boolean;
   expr?: string;
   index?: number;
+  /**
+   * Resolve and value-match exactly as a real edit would, but write nothing.
+   * Powers POST /resolve, which lets the overlay find out which stamped
+   * elements can actually be written back before it offers to edit them.
+   */
+  dryRun?: boolean;
 }
 
 interface StyleEdit {
@@ -398,28 +404,97 @@ function applyBoundAttrEdit(
  * a directory `index.*`. Returns undefined for bare/aliased specifiers we can't
  * resolve without tsconfig paths (the caller reports a helpful error).
  */
+/**
+ * Nearest tsconfig/jsconfig compilerOptions for a file, memoised per directory.
+ * `parseJsonConfigFileContent` handles both JSON-with-comments and `extends`,
+ * so `paths`/`baseUrl` arrive already merged and normalised.
+ */
+const compilerOptionsCache = new Map<
+  string,
+  import('ts-morph').ts.CompilerOptions | null
+>();
+
+function compilerOptionsFor(
+  fromFile: string
+): import('ts-morph').ts.CompilerOptions | null {
+  const { ts } = require('ts-morph') as typeof import('ts-morph');
+  const visited: string[] = [];
+  let dir = path.dirname(fromFile);
+
+  for (;;) {
+    const cached = compilerOptionsCache.get(dir);
+    if (cached !== undefined) {
+      for (const d of visited) compilerOptionsCache.set(d, cached);
+      return cached;
+    }
+    visited.push(dir);
+
+    for (const name of ['tsconfig.json', 'jsconfig.json']) {
+      const file = path.join(dir, name);
+      if (!fs.existsSync(file)) continue;
+      const read = ts.readConfigFile(file, ts.sys.readFile);
+      const parsed = ts.parseJsonConfigFileContent(read.config ?? {}, ts.sys, dir);
+      for (const d of visited) compilerOptionsCache.set(d, parsed.options);
+      return parsed.options;
+    }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  for (const d of visited) compilerOptionsCache.set(d, null);
+  return null;
+}
+
+/**
+ * Resolve an import specifier to a source file we may edit.
+ *
+ * Relative specifiers keep a cheap filesystem path. Everything else goes through
+ * `ts.resolveModuleName`, which honours the project's tsconfig `paths`/`baseUrl`
+ * — without this, alias imports (`@/lib/council`, the Next.js default) resolved
+ * to nothing and every bound value living in an aliased module was uneditable,
+ * reported as `unresolved import "@/lib/council"`.
+ *
+ * Anything inside node_modules, or a declaration file, is refused: those are
+ * dependencies, not the user's source, and must never be rewritten.
+ */
 function resolveModuleFile(
   spec: string,
   fromFile: string,
   project: import('ts-morph').Project
 ): import('ts-morph').SourceFile | undefined {
-  if (!spec.startsWith('.')) return undefined;
-  const base = path.resolve(path.dirname(fromFile), spec);
-  const exts = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
-  const candidates = [
-    ...exts.map((e) => base + e),
-    ...['index.ts', 'index.tsx', 'index.js', 'index.jsx'].map((f) =>
-      path.join(base, f)
-    ),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c) && fs.statSync(c).isFile()) {
-      return (
-        project.getSourceFile(c) ?? project.addSourceFileAtPathIfExists(c) ?? undefined
-      );
+  const accept = (file: string): import('ts-morph').SourceFile | undefined => {
+    if (file.includes('node_modules') || file.endsWith('.d.ts')) return undefined;
+    return (
+      project.getSourceFile(file) ??
+      project.addSourceFileAtPathIfExists(file) ??
+      undefined
+    );
+  };
+
+  if (spec.startsWith('.')) {
+    const base = path.resolve(path.dirname(fromFile), spec);
+    const exts = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+    const candidates = [
+      ...exts.map((e) => base + e),
+      ...['index.ts', 'index.tsx', 'index.js', 'index.jsx'].map((f) =>
+        path.join(base, f)
+      ),
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c) && fs.statSync(c).isFile()) return accept(c);
     }
+    return undefined;
   }
-  return undefined;
+
+  const options = compilerOptionsFor(fromFile);
+  if (!options) return undefined;
+
+  const { ts } = require('ts-morph') as typeof import('ts-morph');
+  const resolved = ts.resolveModuleName(spec, fromFile, options, ts.sys)
+    .resolvedModule?.resolvedFileName;
+  return resolved ? accept(resolved) : undefined;
 }
 
 /**
@@ -444,6 +519,33 @@ function resolveModuleFile(
  * Targeting is by VALUE, not position. A unique value edits cleanly; a shared
  * value is refused; no match ⇒ stale.
  */
+/**
+ * Peel wrappers that sit between a declaration and its literal.
+ *
+ * `export const COUNCIL_COPY = { … } as const;` is an AsExpression, not an
+ * ObjectLiteralExpression, so a bare `isObjectLiteralExpression` check refuses
+ * it — and `as const` is the norm for exactly the frozen config/data objects
+ * people most want to edit. Same for `satisfies` and stray parentheses.
+ */
+function unwrapExpr(
+  node: import('ts-morph').Node | undefined
+): import('ts-morph').Node | undefined {
+  const { Node } = require('ts-morph') as typeof import('ts-morph');
+  let cur = node;
+  for (let i = 0; cur && i < 8; i++) {
+    if (Node.isAsExpression(cur) || Node.isSatisfiesExpression(cur)) {
+      cur = cur.getExpression();
+      continue;
+    }
+    if (Node.isParenthesizedExpression(cur) || Node.isTypeAssertion(cur)) {
+      cur = cur.getExpression();
+      continue;
+    }
+    break;
+  }
+  return cur;
+}
+
 export function applyBoundTextEdit(edit: Edit): EditResult {
   const { Project, SyntaxKind, Node } =
     require('ts-morph') as typeof import('ts-morph');
@@ -528,9 +630,11 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
       (l) => l.getLiteralValue() === String(oldText)
     );
     if (matches.length === 1) {
-      matches[0].setLiteralValue(String(newText));
       const owning = matches[0].getSourceFile();
-      owning.saveSync();
+      if (!edit.dryRun) {
+        matches[0].setLiteralValue(String(newText));
+        owning.saveSync();
+      }
       return {
         ok: true,
         fileName: owning.getFilePath(),
@@ -708,9 +812,10 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
       if (!p || !Node.isPropertyAssignment(p))
         return { err: `"${label}": no property "${propPath[i]}".` };
       const v = p.getInitializer();
-      if (!v || !Node.isObjectLiteralExpression(v))
+      const vu = unwrapExpr(v);
+      if (!vu || !Node.isObjectLiteralExpression(vu))
         return { err: `"${label}": "${propPath[i]}" is not a nested object.` };
-      obj = v;
+      obj = vu;
     }
     const leafName = propPath[propPath.length - 1];
     const la = obj.getProperty(leafName);
@@ -741,8 +846,9 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
         }
         continue;
       }
-      if (!Node.isObjectLiteralExpression(el)) continue;
-      const { leaf, err } = leafOfPath(el, propPath, label);
+      const elu = unwrapExpr(el);
+      if (!elu || !Node.isObjectLiteralExpression(elu)) continue;
+      const { leaf, err } = leafOfPath(elu, propPath, label);
       if (err) {
         leafErr = err;
         continue;
@@ -759,11 +865,12 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
     const addFrom = (sf: MorphSourceFile) => {
       for (const d of sf.getVariableDeclarations()) {
         const init = d.getInitializer();
-        if (!init || !Node.isArrayLiteralExpression(init)) continue;
+        const initu = unwrapExpr(init);
+        if (!initu || !Node.isArrayLiteralExpression(initu)) continue;
         const key = sf.getFilePath() + '#' + d.getName();
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push({ arr: init, label: d.getName() });
+        out.push({ arr: initu, label: d.getName() });
       }
     };
     addFrom(sourceFile);
@@ -847,8 +954,9 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
               cname,
               fromOpening.getSourceFile()
             );
-            if (init && Node.isArrayLiteralExpression(init)) {
-              return { kind: 'array', arr: init, propPath, label: cname };
+            const initArr = unwrapExpr(init);
+            if (initArr && Node.isArrayLiteralExpression(initArr)) {
+              return { kind: 'array', arr: initArr, propPath, label: cname };
             }
             // `visible` from useMemo / filter — fall back to value-match across
             // known object arrays (AGENDA, SPEAKERS, …).
@@ -882,13 +990,14 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
       };
     }
     const { init, where } = resolveInitializer(base, fromOpening.getSourceFile());
-    if (!init || !Node.isObjectLiteralExpression(init)) {
+    const initObj = unwrapExpr(init);
+    if (!initObj || !Node.isObjectLiteralExpression(initObj)) {
       return {
         kind: 'fail',
         error: `Could not resolve "${base}" to an object literal (${where}).`,
       };
     }
-    return { kind: 'object', obj: init, propPath, label: base };
+    return { kind: 'object', obj: initObj, propPath, label: base };
   };
 
   /**
@@ -982,8 +1091,7 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
         };
       } else {
         lastErr =
-          leafErr ??
-          `No entry in data arrays (via "${hit.via}") currently has ${hit.propPath.join('.')} === "${oldText}"; reload and try again.`;
+          leafErr ?? `Not editable — this text comes from your data, not your code.`;
       }
       continue;
     }
@@ -1003,11 +1111,8 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
     } else {
       lastErr =
         leafErr ??
-        `No entry in ${hit.label} currently ${
-          hit.propPath.length
-            ? `has ${hit.propPath.join('.')} === `
-            : 'equals '
-        }"${oldText}"; reload and try again.`;
+        `Couldn't find this text in ${hit.label} — the source may have changed, ` +
+        `or the text is altered before it's shown.`;
     }
   }
 
@@ -1015,9 +1120,11 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
   const unique = [...new Set(allMatches)];
   if (unique.length === 1) {
     const leafInit = unique[0];
-    leafInit.setLiteralValue(String(newText));
     const owning = leafInit.getSourceFile();
-    owning.saveSync();
+    if (!edit.dryRun) {
+      leafInit.setLiteralValue(String(newText));
+      owning.saveSync();
+    }
     return {
       ok: true,
       fileName: owning.getFilePath(),
@@ -1152,6 +1259,56 @@ export function applyStyleEdit(edit: StyleEdit): EditResult {
   return { ok: true, fileName, lineNumber, property, value };
 }
 
+interface ResolveItem {
+  fileName: string;
+  lineNumber?: number;
+  columnNumber?: number;
+  expr: string;
+  oldText: string;
+}
+
+/**
+ * Dry-run a batch of bound-text stamps and report which are actually writable.
+ *
+ * The SWC plugin stamps `{s.display_name}` on shape alone — it is syntactic,
+ * single-file, and cannot tell a `.map` over a literal array from one over rows
+ * fetched at runtime. That made the overlay advertise edits which could never
+ * land: the element highlighted, and committing produced an error. This lets the
+ * overlay ask first, using the very same resolution the write path uses, so the
+ * two can never disagree.
+ *
+ * Callers should send one item per distinct source location (a `.map` renders
+ * many elements from one line), which is also what keeps the batch cheap.
+ */
+function resolveBatch(items: ResolveItem[]): {
+  key: string;
+  ok: boolean;
+  error?: string;
+}[] {
+  return items.map((it) => {
+    const key = `${it.fileName}:${it.lineNumber}:${it.columnNumber}|${it.expr}`;
+    try {
+      const r = applyBoundTextEdit({
+        fileName: it.fileName,
+        lineNumber: it.lineNumber,
+        columnNumber: it.columnNumber,
+        expr: it.expr,
+        oldText: it.oldText,
+        newText: it.oldText,
+        textBound: true,
+        dryRun: true,
+      });
+      return { key, ok: r.ok, error: r.error };
+    } catch (err) {
+      return {
+        key,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+}
+
 function handler(req: IncomingMessage, res: ServerResponse): void {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.method === 'GET' && req.url === '/health') {
@@ -1176,7 +1333,8 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
   }
   const isText = req.method === 'POST' && req.url === '/edit';
   const isStyle = req.method === 'POST' && req.url === '/style';
-  if (!isText && !isStyle) {
+  const isResolve = req.method === 'POST' && req.url === '/resolve';
+  if (!isText && !isStyle && !isResolve) {
     return send(res, 404, { ok: false, error: 'not found' });
   }
 
@@ -1192,6 +1350,25 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
     } catch {
       return send(res, 400, { ok: false, error: 'invalid JSON' });
     }
+    if (isResolve) {
+      const items = Array.isArray((payload as { items?: ResolveItem[] }).items)
+        ? (payload as unknown as { items: ResolveItem[] }).items
+        : [];
+      try {
+        const results = resolveBatch(items);
+        const dead = results.filter((r) => !r.ok).length;
+        if (dead) {
+          console.log(
+            `[nextcanvas] ${dead}/${results.length} bound-text location(s) are not writable; the overlay will not offer them`
+          );
+        }
+        return send(res, 200, { ok: true, results });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return send(res, 500, { ok: false, error: message });
+      }
+    }
+
     try {
       const result = isStyle
         ? applyStyleEdit(payload)
