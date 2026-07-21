@@ -452,6 +452,25 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   owner dies, the next tick takes over (verified: sibling worker takes over ~2s
   after the owner is killed, and the idle worker logs nothing in the meantime).
   Do not "simplify" this back to a single `listen` call.
+- **Import resolution must honour tsconfig `paths`, not just relative specifiers.**
+  `resolveModuleFile` used to bail on anything not starting with `.`, so alias
+  imports — `@/lib/council`, the Next.js default — resolved to nothing and every
+  bound value in an aliased module was uneditable (`unresolved import
+  "@/lib/council"`). One real consumer was **88 aliased imports to 3 relative**,
+  i.e. almost everything. It now falls through to `ts.resolveModuleName` (via
+  ts-morph's re-exported `ts`) with the nearest tsconfig/jsconfig's options,
+  memoised per directory; `parseJsonConfigFileContent` handles JSON-with-comments
+  and `extends` for free. **Files under `node_modules` and any `.d.ts` are
+  refused** — those are dependencies, and write-back must never touch them.
+- **Unwrap `as const` / `satisfies` before checking for a literal.**
+  `export const COUNCIL_COPY = { … } as const;` is an `AsExpression`, so a bare
+  `Node.isObjectLiteralExpression` check refuses it — and `as const` is exactly
+  the idiom used for the frozen config/data objects people most want to edit.
+  `unwrapExpr()` peels `as` / `satisfies` / parens / type assertions and is
+  applied at **every** literal-shape check (arrays too: `SPEAKERS = [...] as
+  const` had the same problem). When adding a new check, narrow on the unwrapped
+  node and keep using it downstream — TS won't catch you narrowing one variable
+  and then reading the original.
 - **Port is single-sourced via `NEXTCANVAS_PORT`.** `src/server.ts` derives
   `PORT` from it; `withCanvas` inlines that same value into the client (`env`),
   and `<NextCanvasOverlay/>` publishes it as `window.__NEXTCANVAS_SERVER__` so the
@@ -678,6 +697,64 @@ Non-obvious constraints learned building this — **do not re-learn the hard way
 
 Legacy single-text payloads still work unchanged (overlay sends `oldText/newText`
 when the element has no child elements; server falls through to the old path).
+
+### The overlay asks before it offers (`POST /resolve`)
+
+**The plugin stamps on shape; only the server knows if an edit can land.** The
+SWC plugin is syntactic and single-file — it cannot tell `speakers.map(s => …
+{s.display_name})` over a literal array from the same code over rows fetched at
+runtime. It stamped both, so the overlay outlined DB-backed text and every commit
+error-toasted. Found in a real consumer whose speakers/council sections come from
+Supabase.
+
+Fix: `POST /resolve` dry-runs a batch of stamped locations through
+**`applyBoundTextEdit` itself** (`dryRun: true` skips `setLiteralValue` +
+`saveSync` at both write sites) and reports which are writable. The overlay calls
+it after init and on a debounced `MutationObserver`, caches by
+`"<data-loc>|<expr>"`, and `isEditableEl` refuses anything in the unwritable set —
+no outline, no double-click.
+
+- **Key by source LOCATION, not element.** A `.map` renders many elements from
+  one line; in the consumer's app 38 unique locations covered every stamp, and 13
+  came back unwritable. Sending one item per element would be ~3× the work for
+  the same answer.
+- **Reusing the real write path is the point** — a separate "can I edit this?"
+  predicate would drift from what commit actually does.
+- Failure is non-fatal: if the server is unreachable the overlay leaves
+  everything editable and lets commit report the problem, as before.
+- Elements are only suppressed *after* the round trip lands, so there is a brief
+  window where a doomed edit is still offered. Measured at ~26ms server-side for
+  38 locations (plus the 250ms debounce), so the window is far too short to click
+  through in practice.
+- **Results are re-verified on a throttle (`FULL_RECHECK_MS`, 3s), not cached
+  forever.** A full pass is cheap, and caching permanently goes stale the moment
+  someone refactors a component from a literal array to a fetch — Fast Refresh
+  re-renders while the overlay keeps offering the old answer. Newly-seen
+  locations are still sent immediately. Results clear entries too: a location
+  that becomes writable again stops being suppressed.
+- **Suppressed elements get a read-only hover hint**, not silence — a dashed
+  outline plus "from your data — not editable". Without it the fields simply stop
+  highlighting, which reads as broken rather than deliberate; the toast copy is
+  now a backstop that most users will never see.
+- `unwritableBoundAt()` checks the element, its ancestors, **and its direct
+  children** — a component's text is wrapped in a `display:contents` span, which
+  has no box and so is never the event target itself. `drawReadonly` falls back
+  to the parent's rect for the same reason.
+
+**Error copy must distinguish "never editable" from "stale".** `reload and try
+again` is right when the source moved under a real literal, and a lie when the
+value was never in the source at all. The two bound-text fallbacks are now split:
+the **unresolved-collection** path (scanned every data array, found nothing —
+i.e. runtime data) says *"Not editable — this text comes from your data, not your
+code."*, while the **resolved-array** path (the array IS in source, the value
+isn't in it) blames a changed source or text altered before display.
+
+Keep `reload and try again` only where staleness is genuinely the likely cause
+(mixed-run mismatch, ternary arm, direct-object value mismatch).
+
+**Keep these short and non-technical.** A first pass explained literals, fetches
+and APIs — accurate, and far too much to read in a toast. The operator wants the
+verdict and the reason in one line, not the mechanism.
 
 ### Bound-text edits (`{member.chain}` / `??` / prop-drilled `{ident}` → data)
 

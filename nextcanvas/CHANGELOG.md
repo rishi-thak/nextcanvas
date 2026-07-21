@@ -5,6 +5,34 @@ release-tag dates; versions match `package.json` / npm.
 
 ## Unreleased
 
+## 0.2.0 — 2026-07-21
+
+- Bound text that can't actually be written back is no longer offered for
+  editing. The SWC plugin stamps on shape alone — it can't tell
+  `speakers.map((s) => <h3>{s.display_name}</h3>)` over a literal array from the
+  same code over rows fetched from a database — so it stamped both, and elements
+  highlighted invitingly then error-toasted on commit. The overlay now asks the
+  server first (`POST /resolve`), which dry-runs each stamped location through
+  the real write path and reports which are writable. Unwritable ones get no
+  outline and don't respond to double-click.
+- Unwritable elements show a read-only hint on hover ("from your data — not
+  editable") rather than silently doing nothing, so they read as deliberate
+  rather than broken.
+- Alias imports now resolve. Module resolution only handled relative specifiers,
+  so anything imported through a tsconfig `paths` alias — `@/lib/council`, the
+  Next.js default — failed with `unresolved import`, making every bound value in
+  an aliased module uneditable. Resolution now honours the nearest
+  tsconfig/jsconfig, including `extends` and JSON-with-comments. Files under
+  `node_modules` and `.d.ts` files are refused: those are dependencies, not your
+  source.
+- `as const` and `satisfies` no longer block edits.
+  `export const COUNCIL_COPY = { … } as const;` is an `AsExpression`, so the
+  object-literal check refused it — which hit exactly the frozen config objects
+  people most want to edit. Applies to arrays too (`SPEAKERS = [...] as const`).
+- Better failure messages. "reload and try again" was misleading when the value
+  was never in your source to begin with; that case now reads "Not editable —
+  this text comes from your data, not your code." The wording is kept for cases
+  where the source genuinely moved.
 - SWC plugin: the synthetic `<span>` wrapper used to reach text on
   non-forwarding components (e.g. `<Reveal>`) now sets `style={{ display:
   'contents' }}`, so it no longer becomes a real box in the layout — it was

@@ -138,6 +138,7 @@ whenBodyReady(function initNextCanvas(): void {
 
   const BASE = window.__NEXTCANVAS_SERVER__ || 'http://localhost:3131';
   const SERVER = BASE + '/edit';
+  const RESOLVE_SERVER = BASE + '/resolve';
   const STYLE_SERVER = BASE + '/style';
 
   const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
@@ -248,6 +249,109 @@ whenBodyReady(function initNextCanvas(): void {
     };
   }
 
+  // Bound-text locations the server says it cannot write back to, keyed by
+  // "<data-loc>|<expr>". A `.map` renders many elements from ONE source
+  // location, so the key is per-location, not per-element — which is also what
+  // keeps the batch small (17 speaker fields collapse to 3 checks).
+  const unwritableBound = new Set<string>();
+  const checkedBound = new Set<string>();
+  // A full re-check of every stamped location costs ~26ms server-side for ~40
+  // locations, so caching results forever isn't worth the staleness: refactor a
+  // component from a literal array to a fetch and Fast Refresh re-renders while
+  // the overlay would still be offering the old answer. Re-verify everything on
+  // a throttle, and send newly-seen locations immediately.
+  const FULL_RECHECK_MS = 3000;
+  let lastFullCheck = 0;
+
+  function boundKey(el: Element): string {
+    return (
+      (el.getAttribute('data-loc') ?? '') +
+      '|' +
+      (el.getAttribute('data-nc-text-bound') ?? '')
+    );
+  }
+
+  /**
+   * Ask the server which stamped bound-text locations are actually writable,
+   * using the same resolution the write path uses so the two cannot disagree.
+   * Only unseen locations are sent, so repeat calls after DOM changes are cheap.
+   */
+  async function checkBoundWritability(): Promise<void> {
+    const items: {
+      key: string;
+      fileName: string;
+      lineNumber: number;
+      columnNumber: number;
+      expr: string;
+      oldText: string;
+    }[] = [];
+
+    const full = Date.now() - lastFullCheck >= FULL_RECHECK_MS;
+    const seenThisPass = new Set<string>();
+
+    document.querySelectorAll('[data-nc-text-bound]').forEach((node) => {
+      const key = boundKey(node);
+      // One item per source LOCATION: a `.map` renders many elements from one
+      // line, and they all resolve identically.
+      if (seenThisPass.has(key)) return;
+      if (!full && checkedBound.has(key)) return;
+      seenThisPass.add(key);
+      checkedBound.add(key);
+      const src = getSource(node);
+      const expr = node.getAttribute('data-nc-text-bound');
+      const text = (node.textContent ?? '').trim();
+      if (!src || !expr || !text) return;
+      items.push({ key, ...src, expr, oldText: text });
+    });
+
+    if (!items.length) return;
+    if (full) lastFullCheck = Date.now();
+
+    try {
+      const res = await fetch(RESOLVE_SERVER, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      });
+      const json = (await res.json()) as {
+        ok: boolean;
+        results?: { key: string; ok: boolean; error?: string }[];
+      };
+      if (!json.ok || !json.results) return;
+      let dead = 0;
+      for (const r of json.results) {
+        if (r.ok) {
+          // Source may have changed the other way — stop suppressing it.
+          unwritableBound.delete(r.key);
+          continue;
+        }
+        dead++;
+        unwritableBound.add(r.key);
+      }
+      if (dead) {
+        // Worth saying out loud: these elements look ordinary but will never be
+        // offered, and the reason (runtime data, unresolved import) is not
+        // visible in the DOM.
+        console.info(
+          '[nextcanvas] ' +
+            dead +
+            ' bound-text location(s) are not editable — their values are not ' +
+            'resolvable in your source (e.g. loaded at runtime). Hover outlines ' +
+            'are suppressed for those.'
+        );
+        hideOutline();
+      }
+    } catch {
+      // Server unreachable: leave everything editable and let commit report it.
+    }
+  }
+
+  let boundCheckTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleBoundCheck(): void {
+    if (boundCheckTimer) clearTimeout(boundCheckTimer);
+    boundCheckTimer = setTimeout(() => void checkBoundWritability(), 250);
+  }
+
   function isEditableEl(el: EventTarget | null): el is HTMLElement {
     if (!el || !(el instanceof HTMLElement)) return false;
     if (inUI(el)) return false;
@@ -258,6 +362,13 @@ whenBodyReady(function initNextCanvas(): void {
     // are left unstamped (and therefore not editable) — this is what stops us
     // outlining elements whose commit would bounce.
     if (!el.hasAttribute('data-loc')) return false;
+    // Bound text is stamped on SHAPE alone — the compile-time plugin can't tell
+    // a `.map` over a literal array from one over rows fetched at runtime. The
+    // server dry-runs each stamped location (see checkBoundWritability) and we
+    // drop the ones whose write-back could never land, so the overlay stops
+    // advertising edits that are guaranteed to fail on commit.
+    if (el.hasAttribute('data-nc-text-bound') && unwritableBound.has(boundKey(el)))
+      return false;
     // Editable if it has at least one non-whitespace DIRECT text run. Mixed
     // children (text + inline elements) qualify; a container of only elements
     // or only whitespace does not.
@@ -411,9 +522,21 @@ whenBodyReady(function initNextCanvas(): void {
       position: fixed; bottom: 72px; left: 50%; transform: translateX(-50%);
       z-index: 2147483647; font: 12px/1.4 ui-sans-serif, system-ui, sans-serif;
       background: #111; color: #fff; padding: 8px 12px; border-radius: 6px;
-      box-shadow: 0 4px 16px rgba(0,0,0,.3); max-width: 80vw;
+      box-shadow: 0 4px 16px rgba(0,0,0,.3); max-width: min(80vw, 440px);
     }
     .nextcanvas-toast.err { background: #7f1d1d; }
+    /* Stamped, but the server says its value can't be written back (runtime
+       data). Shown so these don't read as simply broken. */
+    .nextcanvas-readonly {
+      position: fixed; pointer-events: none; z-index: 2147483000;
+      border: 1px dashed rgba(120,120,140,.75); border-radius: 3px;
+    }
+    .nextcanvas-readonly-tag {
+      position: fixed; pointer-events: none; z-index: 2147483000;
+      font: 10.5px/1 ui-sans-serif, system-ui, sans-serif;
+      background: #3f3f46; color: #e4e4e7; padding: 3px 6px;
+      border-radius: 4px; white-space: nowrap;
+    }
     [contenteditable].nextcanvas-active {
       outline: 2px solid #6d28d9; outline-offset: 2px; cursor: text;
     }
@@ -593,6 +716,19 @@ whenBodyReady(function initNextCanvas(): void {
   `;
   document.head.appendChild(style);
 
+  const roOutline = document.createElement('div');
+  roOutline.className = 'nextcanvas-readonly';
+  roOutline.style.display = 'none';
+  roOutline.setAttribute('data-nextcanvas-ui', '');
+  document.body.appendChild(roOutline);
+
+  const roTag = document.createElement('div');
+  roTag.className = 'nextcanvas-readonly-tag';
+  roTag.style.display = 'none';
+  roTag.setAttribute('data-nextcanvas-ui', '');
+  roTag.textContent = 'from your data — not editable';
+  document.body.appendChild(roTag);
+
   const outline = document.createElement('div');
   outline.className = 'nextcanvas-outline';
   outline.style.display = 'none';
@@ -628,6 +764,50 @@ whenBodyReady(function initNextCanvas(): void {
   }
   function hideOutline(): void {
     outline.style.display = 'none';
+  }
+
+  function hideReadonly(): void {
+    roOutline.style.display = 'none';
+    roTag.style.display = 'none';
+  }
+
+  function drawReadonly(el: HTMLElement): void {
+    const r = el.getBoundingClientRect();
+    // A component-wrapped span can be display:contents and have no box of its
+    // own; fall back to the parent so the hint still lands somewhere sensible.
+    const box =
+      r.width || r.height ? r : (el.parentElement ?? el).getBoundingClientRect();
+    if (!box.width && !box.height) return hideReadonly();
+    roOutline.style.display = 'block';
+    roOutline.style.left = box.left + 'px';
+    roOutline.style.top = box.top + 'px';
+    roOutline.style.width = box.width + 'px';
+    roOutline.style.height = box.height + 'px';
+    roTag.style.display = 'block';
+    roTag.style.left = box.left + 'px';
+    roTag.style.top = Math.max(2, box.top - 20) + 'px';
+  }
+
+  /**
+   * The stamped-but-unwritable element at this hover target, if any. Checks the
+   * element, its ancestors, and its DIRECT children — the last because a
+   * component's text is wrapped in a `display:contents` span, which has no box
+   * and so never becomes the event target itself.
+   */
+  function unwritableBoundAt(el: EventTarget | null): HTMLElement | null {
+    if (!el || !(el instanceof HTMLElement)) return null;
+    // Plain boolean, not a type predicate: a predicate here narrows `el` itself
+    // to `never` in the branches below.
+    const isDead = (n: Element | null): boolean =>
+      !!n && n.hasAttribute('data-nc-text-bound') && unwritableBound.has(boundKey(n));
+    if (isDead(el)) return el;
+    const up = el.closest('[data-nc-text-bound]');
+    if (isDead(up)) return up as HTMLElement;
+    for (let i = 0; i < el.children.length; i++) {
+      const c = el.children[i];
+      if (isDead(c)) return c as HTMLElement;
+    }
+    return null;
   }
 
   // Persistent outline for the element selected in the style panel.
@@ -1509,8 +1689,15 @@ whenBodyReady(function initNextCanvas(): void {
         return;
       }
       if (el instanceof HTMLElement && el.isContentEditable) return;
-      if (isEditableEl(el)) drawOutline(el);
-      else hideOutline();
+      if (isEditableEl(el)) {
+        drawOutline(el);
+        hideReadonly();
+      } else {
+        hideOutline();
+        const dead = unwritableBoundAt(el);
+        if (dead) drawReadonly(dead);
+        else hideReadonly();
+      }
       if (!panelOpen) {
         const host = attrHost(el);
         if (host) showChip(host);
@@ -1524,6 +1711,7 @@ whenBodyReady(function initNextCanvas(): void {
     'scroll',
     () => {
       hideOutline();
+      hideReadonly();
       if (panelOpen && panelTarget) positionPanel(panelTarget);
       else hideChip();
       drawSelOutline();
@@ -1745,6 +1933,16 @@ whenBodyReady(function initNextCanvas(): void {
     },
     true
   );
+
+  // Find out which bound-text stamps can actually be written back. Runs after
+  // the UI is up (so nothing blocks first paint) and again when the DOM changes
+  // — Fast Refresh and client-side navigation both bring in new stamps, and only
+  // locations we haven't already checked get sent.
+  scheduleBoundCheck();
+  new MutationObserver(scheduleBoundCheck).observe(document.body, {
+    childList: true,
+    subtree: true,
+  });
 
   console.log(
     '[nextcanvas] overlay active — double-click any text to edit; toolbar bottom-right'
