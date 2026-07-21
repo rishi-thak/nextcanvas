@@ -215,17 +215,32 @@ Verify the run under the repo's **Actions** tab, then confirm on npm:
   nothing in dev with Buttons off, and copies correctly with Buttons on **and** in
   a production build (no overlay). Before "fixing" a dead control in the demo,
   toggle Buttons ON or test against `next build && next start`.
-- **Do not set `turbopack.root` / `outputFileTracingRoot` in `demo/next.config.js`**
-  to silence the "multiple lockfiles" warning. Locally
-  `demo/node_modules/@rishi-thak/nextcanvas` is a symlink up to `../nextcanvas`;
-  pinning the root to `demo/` puts that target outside it and the build dies with
-  `Module not found: Can't resolve '@rishi-thak/nextcanvas'`. The warning is
-  local-only noise — on Vercel (root = `demo/`) there is no second lockfile.
-- **`npm install` in `demo/` may not replace that symlink.** The local package's
-  own version satisfies the published range (`^0.1.0`), so npm leaves the existing
-  symlink in place — meaning local dev can still be resolving `nextcanvas/dist/`
-  even though `package.json` names the published dep. Verify with
-  `ls -l demo/node_modules/@rishi-thak/nextcanvas` rather than trusting the range.
+- **`turbopack.root` / `outputFileTracingRoot` are pinned to the REPO ROOT**, not
+  to `demo/`, silencing the "multiple lockfiles" warning (the repo root has its
+  own lock for Playwright). Pinning them to `__dirname` breaks the build with
+  `Module not found: Can't resolve '@rishi-thak/nextcanvas'` whenever the dep is
+  swapped to `file:../nextcanvas`, because that symlink target sits outside
+  `demo/`. The repo root keeps both arrangements valid.
+- **The lockfile is the source of truth for the dep, not `package.json` — this
+  broke a Vercel deploy.** `demo/package.json` said `^0.1.0` while
+  `demo/package-lock.json` still carried
+  `"node_modules/@rishi-thak/nextcanvas": { "resolved": "../nextcanvas", "link":
+  true }` left over from the `file:` days. npm follows the lockfile, so CI linked
+  the local package and ran its `prepare` (`tsc`), which isn't installed for a
+  linked dep → `npm error code 127 / sh: tsc: not found` at the **install** step,
+  before any build ran. Editing `package.json` is not enough: `npm install` will
+  happily keep an existing symlink when its version satisfies the range. After
+  changing that dep, verify **both**:
+  `grep -A3 '"node_modules/@rishi-thak/nextcanvas"' demo/package-lock.json`
+  (want a `registry.npmjs.org` URL, not `"link": true`) and
+  `ls -ld demo/node_modules/@rishi-thak/nextcanvas` (want a real directory).
+  To force it: `rm -rf node_modules/@rishi-thak package-lock.json && npm install`.
+- **Simulate a Vercel build properly before trusting a deploy fix.** Copy the
+  **working tree** (not a `git clone` of an older commit — that silently builds
+  stale code and proves nothing), excluding `node_modules`, `.next`,
+  `nextcanvas/dist`, then `cd demo && npm ci && npm run build`. This reproduces
+  root = `demo/` with the sibling package present but `dist/` absent, which is
+  exactly the failing shape.
 
 ### Testing (browser round-trip)
 
@@ -487,6 +502,66 @@ using the stock demo `next.config.js`.
 pulling, run `npm install` (or `npm run build`) inside `nextcanvas/` to rebuild
 `dist/` before a `file:` consumer picks up source changes, then fully restart
 `next dev` (`rm -rf <app>/.next`, kill any stray :3131 server).
+
+## The deployed demo ships the overlay (browser-only edits)
+
+The **landing page of the deployed site** runs the real overlay, with edits
+applied in the browser and nothing written to disk. Reloading restores the
+served HTML. **This is entirely demo-side — the package is untouched** and must
+stay that way.
+
+Why it works at all: the overlay is already **DOM-authoritative**. Text lands via
+`contentEditable`, attributes via `setAttribute`, and `commitStyle` applies the
+inline style *before* the fetch. The overlay only ever **reverts** the DOM when
+the server rejects an edit. So a stub server that acknowledges everything leaves
+the visitor's change standing, and no source is touched.
+
+The pieces, all in `demo/`:
+
+- **`next.config.js`** injects the SWC plugin when `NODE_ENV !== 'development'`.
+  `withCanvas` deliberately no-ops outside dev, so without this there are no
+  `data-loc` stamps in the production build and the overlay has nothing to grab.
+  Guard it on NODE_ENV — injecting unconditionally would double-stamp in dev
+  (verify with: exactly **one** entry in `experimental.swcPlugins` in both modes).
+- **`app/api/nextcanvas/{edit,style}/route.ts`** — stub write-back. Always
+  `{ok:true}`, writes nothing (`acknowledge.ts`).
+- **`app/api/nextcanvas/overlay.js/route.ts`** — serves the package's
+  `dist/overlay.js` (read from `node_modules` at build time; `force-static`) and
+  **rewrites the success copy on the way out**, since the originals promise
+  "Fast Refresh will update the view", which never happens here. A missed patch
+  warns at build time rather than failing — check the build log after bumping the
+  package, because those strings live upstream.
+- **`app/DemoCanvas.tsx`** — mounts the script. Needed because the package's
+  `<NextCanvasOverlay/>` **hard-returns when `NODE_ENV !== 'development'`**
+  (`src/index.ts:76`), so it cannot be reused. Sets
+  `window.__NEXTCANVAS_SERVER__ = '/api/nextcanvas'` (same-origin, so no CORS
+  preflight) before appending the script, seeds first-visit defaults, and renders
+  the dismissible notice.
+- **`demo/global.d.ts`** declares `window.__NEXTCANVAS_SERVER__`; the package
+  declares it internally but doesn't ship the type to consumers.
+
+First-visit defaults (seeded only when the key is absent, so a returning
+visitor's choice is never overwritten):
+
+- `nextcanvas:enabled = '0'` — **the tool starts OFF**, so the site behaves like a
+  normal site and the toolbar collapses to brand + switch.
+- `nextcanvas:buttons = 'on'` — so that when someone switches it on, links and
+  controls keep working instead of the page going inert.
+
+Scope and costs:
+
+- Mounted in **`app/page.tsx`, not the layout** — the landing page only. `/docs`
+  stays a normal static site.
+- The plugin is **build-wide**, so docs pages carry `data-loc` stamps too
+  (~77–131 per page) even though no overlay mounts there. Inert attributes, a few
+  KB. Accepted, not a bug.
+- Visitors to `/` fetch the ~64 KB overlay script.
+- Stamps under Turbopack are project-relative (`demo/app/page.tsx`), so no
+  absolute build paths leak into public HTML.
+
+**Dev is unaffected**: `DemoCanvas` returns null in development, the root layout
+still mounts the package's own overlay, and edits still write to real files
+through :3131.
 
 ## Current scope
 
