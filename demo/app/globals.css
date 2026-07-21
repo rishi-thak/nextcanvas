@@ -211,6 +211,27 @@ h1.hero-title {
   font-size: 12px;
   border-left: 1px solid var(--border);
   padding-left: 12px;
+  /* It's a <button>: strip the UA chrome so it still reads as part of the pill. */
+  background: none;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-right: 0;
+  cursor: pointer;
+  transition: color 0.15s ease;
+  /* Keep the label out of a manual drag-select of the pill, so selecting the
+     command by hand can't sweep "copy" into the clipboard too. */
+  user-select: none;
+}
+.install-pill .copy:hover {
+  color: var(--text);
+}
+.install-pill .copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
 }
 
 /* ---------- Section scaffolding ---------- */
