@@ -55,15 +55,14 @@ export default function Home() {
           <p className="hero-sub">
             nextcanvas turns your locally-running app into an editable canvas. double-click any text, type a new value, and it is written straight back into your source file. fast refresh does the rest.
                                                                                                   </p>
-          <div className="hero-cta">
-            <a className="btn btn-primary btn-lg" href="#install">
-              get started
-                                      </a>
+          {/* The copy-prompt pill IS the primary action now — pasting setup into
+              an agent is the path most people take, so it replaces "get started". */}
+          <div className="hero-actions">
+            <InstallPill />
             <a className="btn btn-ghost btn-lg" href={GITHUB}>
               star on github
-                                      </a>
+            </a>
           </div>
-          <InstallPill />
           <p
             style={{
               marginTop: 22,
