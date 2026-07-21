@@ -6,6 +6,12 @@ interface Window {
   __nextCanvasLoaded?: boolean;
   /** Base URL of the write-back server, published by <NextCanvasOverlay/>. */
   __NEXTCANVAS_SERVER__?: string;
+  /**
+   * Removes the provisional Buttons-off blockers installed by
+   * `<NextCanvasOverlay/>` before `overlay.js` finishes loading. The overlay
+   * calls this on init so it can take over with the full UI-aware handlers.
+   */
+  __nextCanvasBootCleanup?: () => void;
 }
 
 /** The single edit-server instance, cached per Node process (see server.ts). */

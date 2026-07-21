@@ -267,22 +267,28 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   as `async` in `<head>`, before `<body>` exists; touching `document.body` at load
   time throws and silently aborts the whole overlay.
 - **The "Buttons" toolbar toggle gates all page interactivity.** OFF (the
-  default, "edit mode") makes the page inert: the document-level capture click
-  handler `preventDefault()`s **and** `stopPropagation()`s every non-UI click, so
-  links don't navigate, in-page anchors don't scroll, and the app's own `onClick`
-  handlers don't fire — this is what lets you single-click to select for styling
-  and double-click to edit without a stamped `<a href="#anchor">` scrolling the
-  element out from under you. ON ("live mode") makes the overlay passive for
-  clicks (early `return` before `preventDefault`), so the app behaves normally and
-  single-click does **not** select. Persisted as `nextcanvas:buttons` (`on`/`off`)
-  in localStorage; toggling ON also drops any current style selection. Hover
-  outlines, the attr chip, and double-click editing stay available in both modes.
-  This is a **different** control from the master on/off switch (`enabled`,
-  `.nc-switch`, `data-act="toggle"`, below): the master switch turns the *whole
-  tool* off, the Buttons toggle only gates the *page's* interactivity while
-  editing stays on. To avoid colliding with the master switch's `.nc-switch`
-  styles, the Buttons control is its own toggle-switch markup namespaced
-  `.nc-btnsw-*` (`data-act="buttons"`, state `buttonsEnabled`, `setButtons`).
+  default, "edit mode") makes the page inert: capture-phase handlers on
+  **`window`** for `pointerdown` / `mousedown` / `click` / `auxclick` call
+  `stopPropagation` + `stopImmediatePropagation` (and `preventDefault` on
+  `click`/`auxclick`) for every non-UI event, so Next `<Link>` soft-nav, in-page
+  anchors, and the app's `onClick` / Motion gestures don't fire — `click` alone
+  on `document` is not enough (Motion listens on `pointerdown`; a fast click can
+  also race the async `overlay.js` fetch). `<NextCanvasOverlay/>` installs a
+  matching provisional blocker in its `useEffect` *before* appending the script
+  tag; `overlay.js` removes it on init and takes over. This is what lets you
+  single-click to select for styling and double-click to edit without a stamped
+  `<a href="#anchor">` / `<Link href="/chat">` navigating out from under you.
+  ON ("live mode") makes the overlay passive for those events (early `return`
+  before blocking), so the app behaves normally and single-click does **not**
+  select. Persisted as `nextcanvas:buttons` (`on`/`off`) in localStorage;
+  toggling ON also drops any current style selection. Hover outlines, the attr
+  chip, and double-click editing stay available in both modes. This is a
+  **different** control from the master on/off switch (`enabled`, `.nc-switch`,
+  `data-act="toggle"`, below): the master switch turns the *whole tool* off, the
+  Buttons toggle only gates the *page's* interactivity while editing stays on.
+  To avoid colliding with the master switch's `.nc-switch` styles, the Buttons
+  control is its own toggle-switch markup namespaced `.nc-btnsw-*`
+  (`data-act="buttons"`, state `buttonsEnabled`, `setButtons`).
 - **Editable attributes come in two flavors, stamped separately.** The plugin
   emits `data-nc-attrs` for string-literal attrs (`href="/x"`) and `data-nc-bound`
   for bound *simple-identifier* attrs (`href={GITHUB}`). Both raise the attr chip;
