@@ -20,6 +20,14 @@ export default function QuickstartPage() {
         <code>{`npm i -D @rishi-thak/nextcanvas
 npx nextcanvas init`}</code>
       </pre>
+
+      <div className="docs-callout tip">
+        <strong>Rather have your agent do it?</strong> The setup control on the{' '}
+        <a href="/">home page</a> has an <strong>agent</strong> tab that copies a
+        ready-to-paste prompt for Claude Code, Cursor, or Codex. Or point your
+        agent straight at <a href="/skill.md">/skill.md</a> — the canonical
+        setup doc, covering wiring, what&apos;s editable, and the gotchas.
+      </div>
       <p>
         <code>init</code> is idempotent — safe to re-run. It does two things for
         you:

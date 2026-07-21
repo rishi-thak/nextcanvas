@@ -42,6 +42,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   immediate task, capture it here (or in memory if it's cross-project) so it
   survives the session.
 
+## Landing page voice (STRICT)
+
+- **The landing page (`demo/app/page.tsx`) is written in all lowercase.** Nav
+  links, headings, body copy, buttons, card titles, and the footer — including
+  proper nouns and acronyms (`next.js`, `github`, `swc`, `ast`, `mit`). Keep new
+  copy in that voice; do not "fix" it back to sentence case.
+- **Exceptions that stay literal:** anything inside a `CodeWindow` (commands,
+  config, output) and code identifiers in prose (`withCanvas`,
+  `NextCanvasOverlay`, `next.config.ts`, `data-loc`, `.tsx`, `next/font`).
+- **`demo/app/docs/*` is NOT lowercase** — docs stay in normal sentence case.
+  The shared `ThemeToggle` uses lowercase labels, matching the landing page.
+- Page `metadata` (title/description/OG) stays in normal case — it's for search
+  and social cards, not page copy.
+
+## Agent-facing setup surface (keep in sync)
+
+The landing page ships a **copy-prompt control** (`demo/app/InstallPill.tsx`,
+tabs: agent / skill / npm) and the site serves **`/skill.md`**
+(`demo/app/skill.md/route.ts`) — a doc-only skill file with YAML frontmatter that
+an agent can be pointed at to install nextcanvas.
+
+- **All copy payloads live in `demo/app/agent-setup.ts`** — install command,
+  agent prompt, skill prompt, tab hints. Add nothing inline in the component;
+  the point is that the three tabs and `/skill.md` cannot drift apart.
+- The skill's `version` is read from the **installed package's** `package.json`,
+  so it tracks the published version automatically. Don't hardcode it.
+- URLs come from `SITE_URL`, so they follow `NEXT_PUBLIC_SITE_URL`.
+- **When package capabilities change, update `skill.md`'s "What you can edit"
+  table and gotchas** alongside `demo/app/docs/` — an agent reading a stale
+  skill file will wire up something wrong.
+- `/skill.md` is served as `text/plain` so it renders in a browser rather than
+  downloading, and is `force-static`.
+
 ## Maintaining docs (STRICT — do it unprompted)
 
 - **When you add or change a user-facing feature, update `demo/app/docs/` in the

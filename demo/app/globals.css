@@ -249,48 +249,96 @@ h1.hero-title {
   flex-wrap: wrap;
   margin-bottom: 28px;
 }
-.install-pill {
+/* ---------- Setup control (copy prompt + method tabs) ---------- */
+.setup {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.setup-bar {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
-  font-family: var(--mono);
-  font-size: 14px;
-  color: var(--text);
+  gap: 6px;
+  padding: 5px;
   background: var(--bg-soft);
   border: 1px solid var(--border);
-  padding: 11px 18px;
-  border-radius: 10px;
+  border-radius: 999px;
 }
-.install-pill .prompt {
-  color: var(--accent-3);
-}
-.install-pill .copy {
-  color: var(--faint);
+.setup-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
   font-family: var(--sans);
-  font-size: 12px;
-  border-left: 1px solid var(--border);
-  padding-left: 12px;
-  /* It's a <button>: strip the UA chrome so it still reads as part of the pill. */
+  font-size: 14px;
+  font-weight: 560;
+  line-height: 1;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  /* Deliberately NOT the accent fill: "get started" is the hero's primary
+     action, and a second violet button beside it flattens the hierarchy. This
+     reads as the label of the control it sits in. */
   background: none;
-  border-top: 0;
-  border-right: 0;
-  border-bottom: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  padding-right: 0;
+  color: var(--text);
   cursor: pointer;
   transition: color 0.15s ease;
-  /* Keep the label out of a manual drag-select of the pill, so selecting the
-     command by hand can't sweep "copy" into the clipboard too. */
+  /* Sized to the longest label ("copy commands") so neither switching tabs nor
+     swapping to "copied" resizes the bar and jogs the tabs sideways. */
+  min-width: 168px;
+  justify-content: center;
   user-select: none;
 }
-.install-pill .copy:hover {
+.setup-copy:hover {
+  color: var(--accent-3);
+}
+.setup-copy svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+.setup-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel-2);
+  border-radius: 999px;
+}
+.setup-tab {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.setup-tab:hover {
+  color: var(--muted);
+}
+.setup-tab[data-active='true'] {
+  background: var(--bg-soft);
+  border-color: var(--border);
   color: var(--text);
 }
-.install-pill .copy:focus-visible {
+.setup-copy:focus-visible,
+.setup-tab:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 3px;
-  border-radius: 3px;
+  outline-offset: 2px;
+}
+.setup-hint {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--faint);
+  margin: 0;
 }
 
 /* ---------- Section scaffolding ---------- */
