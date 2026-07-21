@@ -93,13 +93,24 @@ bundlers — `next/font` and other SWC features keep working.
 but nothing gets stamped, so editing is inactive. On Windows, use
 `next dev --webpack`. Turbopack works on macOS/Linux.
 
-## Current scope (MVP)
+## Current scope
 
 - ✅ Static JSX text: `<h1>Hello</h1>`
 - ✅ Text mixed with inline elements: `<p>Hello <strong>world</strong>!</p>` —
   edit the surrounding text runs; the inline elements are locked and preserved
-- ❌ Bound values: `<h1>{title}</h1>` — left unstamped (not editable); an element
-  with a direct `{expression}` child is skipped
+- ✅ Bound text — data-driven copy is editable too, not just literal JSX text:
+  `<h3>{speaker.name}</h3>`, `<h1>{cfg.title}</h1>`, `??`/`||` fallbacks,
+  string-literal ternaries, and `.map`/prop-drilled params. This resolves back
+  to wherever the value actually lives — a local array/object, an imported
+  constants module (`lib/site.ts`-style copy), even across files — and rewrites
+  the source there. Targeting is by **value**, not DOM position, so filtered or
+  reordered lists still edit the right entry (a value shared by several entries
+  is refused as ambiguous rather than risk the wrong one). Full details on the
+  demo site's `/docs/bound-text` page — computed access (`items[i]`), calls,
+  and mixed `text {expr}` stay unstamped.
+- ✅ String-literal and bound-identifier attributes (`href`, `src`, `alt`, …)
+- ✅ Inline style editing via a design panel (color, background, font-size,
+  font-weight, text-align, padding)
 - ⚠️ Structure must stay intact during a mixed edit — deleting an inline element
   or emptying a whole text run is rejected and reverted with a toast
 - ⚠️ Repeated components (same source line via `.map`) edit the shared source,
@@ -108,8 +119,7 @@ but nothing gets stamped, so editing is inactive. On Windows, use
 ## Roadmap
 
 - Turbopack-on-Windows once the upstream Wasm-plugin gap closes
-- className / inline-style editing
-- Following variable/CMS bindings to their definition
+- className / Tailwind-class editing (inline `style` only today)
 - Element move / duplicate / delete
 - Full pan-zoom canvas UI
 

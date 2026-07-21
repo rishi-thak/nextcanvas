@@ -122,6 +122,20 @@ whenBodyReady(function initNextCanvas(): void {
   }
   window.__nextCanvasBootCleanup = undefined;
 
+  // The SWC plugin stamps `data-loc` at compile time, so if the page rendered
+  // with zero stamps the plugin never ran for this build — most likely an
+  // unsupported bundler/OS combo (e.g. Turbopack on Windows; see the README's
+  // bundler-support table) rather than anything the overlay itself can fix.
+  // Surfacing this here matters because the failure is otherwise silent: the
+  // toolbar loads and looks normal, but nothing is editable.
+  if (document.querySelectorAll('[data-loc]').length === 0) {
+    console.warn(
+      '[nextcanvas] no data-loc stamps found on this page — the SWC plugin ' +
+        "isn't active for this build, so editing is unavailable (read-only). " +
+        'This usually means an unsupported bundler/OS combo; see the README.',
+    );
+  }
+
   const BASE = window.__NEXTCANVAS_SERVER__ || 'http://localhost:3131';
   const SERVER = BASE + '/edit';
   const STYLE_SERVER = BASE + '/style';

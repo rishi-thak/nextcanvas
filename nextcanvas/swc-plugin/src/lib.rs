@@ -43,8 +43,9 @@ use swc_core::common::{SyntaxContext, SourceMapper, DUMMY_SP};
 use swc_core::ecma::ast::{
     BinExpr, BinaryOp, CallExpr, Callee, CondExpr, Expr, FnDecl, FnExpr, Ident, IdentName, JSXAttr,
     JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXClosingElement, JSXElement, JSXElementChild,
-    JSXElementName, JSXExpr, JSXMemberExpr, JSXObject, JSXOpeningElement, Lit, MemberProp,
-    ObjectPatProp, OptChainBase, Param, Pat, Program, Str, VarDeclarator,
+    JSXElementName, JSXExpr, JSXExprContainer, JSXMemberExpr, JSXObject, JSXOpeningElement,
+    KeyValueProp, Lit, MemberProp, ObjectLit, ObjectPatProp, OptChainBase, Param, Pat, Program,
+    Prop, PropName, PropOrSpread, Str, VarDeclarator,
 };
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 use swc_core::plugin::metadata::TransformPluginMetadataContextKind;
@@ -431,6 +432,33 @@ fn span_ident() -> Ident {
     Ident::new("span".into(), DUMMY_SP, SyntaxContext::empty())
 }
 
+/// `style={{ display: 'contents' }}` for the synthetic wrapper span. Must be an
+/// object expression, not a string: React throws
+/// "The `style` prop expects a mapping from style properties to values" if a
+/// JSX `style` attr is a plain string.
+fn style_display_contents_attr() -> JSXAttrOrSpread {
+    JSXAttrOrSpread::JSXAttr(JSXAttr {
+        span: DUMMY_SP,
+        name: JSXAttrName::Ident(IdentName::new("style".into(), DUMMY_SP)),
+        value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
+            span: DUMMY_SP,
+            expr: JSXExpr::Expr(Box::new(Expr::Object(ObjectLit {
+                span: DUMMY_SP,
+                props: vec![PropOrSpread::Prop(Box::new(Prop::KeyValue(
+                    KeyValueProp {
+                        key: PropName::Ident(IdentName::new("display".into(), DUMMY_SP)),
+                        value: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: "contents".into(),
+                            raw: None,
+                        }))),
+                    },
+                )))],
+            }))),
+        })),
+    })
+}
+
 /// Wrap `children` in `<span …attrs>…</span>` so a non-forwarding component still
 /// exposes a stamped host node in the DOM. `data-loc` points at the *component's*
 /// source location so write-back finds the original JSX in the source file.
@@ -630,7 +658,15 @@ impl VisitMut for DataLocStamper {
         // wrap children in a stamped <span> so the DOM always gets a host stamp;
         // data-loc still points at the component's source location for write-back.
         if capitalized && needs_text_stamp {
-            let mut span_attrs = vec![data_attr("data-loc", loc_value.clone())];
+            // `display: contents` keeps the wrapper invisible to layout (flex/grid
+            // item counts, block-vs-inline flow) while leaving it in the DOM for
+            // data-loc lookup and contentEditable — otherwise this span becomes a
+            // real box: the sole flex child under `items-center`, or a line break
+            // before a block-level child like an <img>.
+            let mut span_attrs = vec![
+                data_attr("data-loc", loc_value.clone()),
+                style_display_contents_attr(),
+            ];
             if let Some(path) = &bound_text {
                 span_attrs.push(data_attr("data-nc-text-bound", path.clone()));
             }
