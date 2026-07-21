@@ -307,15 +307,30 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   (capitalized, `<Reveal as="h2">…`, `<Link>…`), **and one-level member tags**
   (`motion.h1`, `motion.p` — Motion forwards DOM attrs). For **text / bound-text
   on a capitalized component**, children are wrapped at compile time in
-  `<span data-loc data-nc-text-bound?>…</span>` so the stamp reaches the DOM even
-  when the component swallows props (Reveal does — no `{...rest}`). `data-loc`
-  still points at the *component's* source location so write-back finds the
-  original JSX. Attr stamps (`data-nc-attrs` / `data-nc-bound`) stay on the
-  component and still need forwarding. If a component *transforms* its children
-  (uppercases, wraps) the DOM text won't match `oldText` and write-back
-  error-toasts. **Namespaced tags (`ns:tag`) and nested members (`Foo.Bar.Baz`)
-  are still NOT stamped.** An element still needs editable text, bound text, or
-  an editable attribute to be stamped at all.
+  `<span data-loc data-nc-text-bound? style={{display:'contents'}}>…</span>` so
+  the stamp reaches the DOM even when the component swallows props (Reveal
+  does — no `{...rest}`). `data-loc` still points at the *component's* source
+  location so write-back finds the original JSX. **The wrapper's `style` must
+  be the object form, not a string** — `style="display:contents"` in JSX makes
+  React throw ("style prop expects a mapping... not a string") since `style` on
+  a DOM element must be an object; build it as `Expr::Object`
+  (`style_display_contents_attr()` in `lib.rs`), not `data_attr()`.
+  `display: contents` keeps the span invisible to layout (it was breaking
+  `flex items-center` by becoming the sole flex item, and forcing block-level
+  children like `<img>` onto their own line) while staying in the DOM for
+  `data-loc` lookup and `contentEditable`. Attr stamps (`data-nc-attrs` /
+  `data-nc-bound`) stay on the component and still need forwarding. If a
+  component *transforms* its children (uppercases, wraps) the DOM text won't
+  match `oldText` and write-back error-toasts. **Namespaced tags (`ns:tag`) and
+  nested members (`Foo.Bar.Baz`) are still NOT stamped.** An element still
+  needs editable text, bound text, or an editable attribute to be stamped at
+  all.
+- **The overlay warns once (`console.warn`) if a page loads with zero
+  `data-loc` stamps.** Checked in `initNextCanvas` right after the
+  `__nextCanvasLoaded` guard, since a stampless page means the SWC plugin
+  didn't run for this build (wrong bundler/OS combo, e.g. Turbopack on
+  Windows) and the tool will otherwise look loaded but silently do nothing —
+  this was previously indistinguishable from user error.
 - **Bound text is editable in ONE unified path, value-matched.** Beyond literal
   text, the plugin stamps an element whose *only* non-whitespace child is a single
   bound expression, emitting `data-nc-text-bound="<expr>"`:
