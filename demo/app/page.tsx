@@ -1,5 +1,6 @@
 import { InstallPill } from './InstallPill';
 import { ThemeToggle } from './ThemeToggle';
+import { DemoCanvas } from './DemoCanvas';
 
 const GITHUB = 'https://github.com/rishi-thak/nextcanvas';
 
@@ -28,6 +29,8 @@ function CodeWindow({
 export default function Home() {
   return (
     <>
+      <DemoCanvas />
+
       {/* ---------------- Nav ---------------- */}
       <nav className="nav">
         <div className="container nav-inner">
@@ -50,8 +53,8 @@ export default function Home() {
         <div className="container">
           <h1 className="hero-title">edit your next.js app right in the browser.</h1>
           <p className="hero-sub">
-            nextcanvas turns your locally-running app into an editable canvas. double-click any static text, type a new value, and it is written straight back into your source file. fast refresh does the rest.
-                                                      </p>
+            nextcanvas turns your locally-running app into an editable canvas. double-click any text, type a new value, and it is written straight back into your source file. fast refresh does the rest.
+                                                                                                  </p>
           <div className="hero-cta">
             <a className="btn btn-primary btn-lg" href="#install">
               get started
@@ -68,8 +71,8 @@ export default function Home() {
               color: 'var(--faint)',
             }}
           >
-            fyi, this entire page is a live nextcanvas demo. you can temporarily edit things here with a similar ui, but follow the steps below to see it work on your own project!
-                                                                                                                                              </p>
+            fyi, this entire page is a live demo running the real overlay. flip the switch in the toolbar, then double-click any text. changes stay in your browser — reload to reset.
+                                </p>
         </div>
       </header>
 

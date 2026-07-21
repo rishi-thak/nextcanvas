@@ -677,3 +677,55 @@ pre.code .prompt {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- Live-demo notice (deployed site only) ----------
+   Sits bottom-left; the nextcanvas toolbar owns bottom-right. */
+.demo-notice {
+  position: fixed;
+  left: 20px;
+  bottom: 20px;
+  z-index: 2147483000;
+  max-width: 310px;
+  padding: 16px 18px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 20px 50px -24px rgba(31, 16, 66, 0.5);
+}
+.demo-notice p {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.demo-notice-title {
+  font-weight: 620;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.demo-notice button {
+  margin-top: 12px;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 550;
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.demo-notice button:hover {
+  background: var(--btn-ghost-hover);
+}
+.demo-notice button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (max-width: 560px) {
+  .demo-notice {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+}

@@ -18,9 +18,18 @@ export default function DocsWelcome() {
       </p>
 
       <div className="docs-callout tip">
-        <strong>Dev-only.</strong> Nothing from nextcanvas ships to production.
-        The overlay, the write-back server, and the source stamps all gate on{' '}
-        <code>NODE_ENV === &apos;development&apos;</code>.
+        <strong>Dev-only.</strong> In your app, nothing from nextcanvas ships to
+        production — the overlay, the write-back server, and the source stamps
+        all gate on <code>NODE_ENV === &apos;development&apos;</code>.
+      </div>
+
+      <div className="docs-callout">
+        <strong>Want to try it before installing?</strong> The{' '}
+        <a href="/">home page</a> runs the real overlay so you can play with it
+        in the browser. Flip the nextcanvas switch in the toolbar and
+        double-click any text. Those edits are browser-only and a reload clears
+        them — that page is wired to a stub backend rather than a write-back
+        server.
       </div>
 
       <h2>Choose a path</h2>
