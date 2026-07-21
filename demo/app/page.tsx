@@ -81,8 +81,8 @@ export default function Home() {
               color: 'var(--faint)',
             }}
           >
-            BTW, this entire page is a live nextcanvas demo. You can temporarily edit things here with a similar UI, but run it in dev and double-click any headline to see how it actually works.
-                                                      </p>
+            BTW, this entire page is a live nextcanvas demo. You can temporarily edit things here with a similar UI, but follow the steps below to see it work on your own project!
+                                                                            </p>
         </div>
       </header>
 
