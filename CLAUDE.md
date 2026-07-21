@@ -75,8 +75,11 @@ Fast Refresh then re-renders. Everything is dev-only and a no-op in production.
 - `demo/` — a throwaway **Next 16 / React 19** App Router app used only to test
   the package (and host the public landing + `/docs` how-to). App code is
   `.tsx`; `next.config.js` stays JS. **Not** part of the package's published
-  `files`. It consumes the package via a `file:../nextcanvas` dependency (npm
-  symlinks it), resolving to `nextcanvas/dist/` + `swc/`.
+  `files`. It consumes the **published** `@rishi-thak/nextcanvas` from npm, so it
+  builds standalone on Vercel (root = `demo/`) — see "Deploying the demo".
+  To exercise *local* package changes, temporarily swap that dep to
+  `file:../nextcanvas` (npm symlinks it, resolving to `nextcanvas/dist/` + `swc/`)
+  and rebuild `dist/` first — but don't commit the swap; it breaks the deploy.
   `demo dev` runs `next dev --webpack` (see the bundler/OS matrix below for why).
   Docs live at `demo/app/docs/*` — user-facing how-to (not package internals).
 
@@ -101,10 +104,51 @@ Run from `demo/`:
   3000 and 3131 (`Get-NetTCPConnection -LocalPort 3000,3131`).
 
 Dependency setup gotcha: `file:` deps do **not** install the package's own
-dependencies, and npm does **not** run the package's `prepare` build for a
-`file:` consumer. After changing `nextcanvas/package.json` deps, run
-`npm install` inside `nextcanvas/` (not just `demo/`) — that installs deps
-(`ts-morph`, the TS toolchain) and builds `dist/`.
+dependencies. npm (11.x) **does** attempt the package's `prepare` build for a
+`file:` consumer, but it **fails** — `prepare` runs `tsc`, and `tsc` isn't on
+PATH because the package's own devDependencies were never installed. Verified on
+a fresh clone: `npm install` inside `demo/` dies with `code 127 / sh: tsc: not
+found`. So after changing `nextcanvas/package.json` deps, run `npm install`
+inside `nextcanvas/` (not just `demo/`) — that installs deps (`ts-morph`, the TS
+toolchain) and builds `dist/`.
+
+### Deploying the demo (Vercel)
+
+`nextcanvas/dist/` is gitignored, so a **fresh clone cannot build `demo/` while
+it depends on `file:../nextcanvas`** — the install fails as described above,
+before `next build` ever runs. This bites any CI/host that starts from a clean
+checkout.
+
+So the demo depends on the **published** package (`"@rishi-thak/nextcanvas":
+"^0.1.0"`), not `file:../nextcanvas`. With Vercel **root directory = `demo/`** it
+then builds standalone — no parent directory, no "Include files outside the Root
+Directory" toggle, no package prebuild step. Verified end-to-end on a fresh clone.
+
+**Consequence:** a package change is only visible to the deployed demo after it's
+**published to npm** and the dep range picks it up. Bump + release the package
+first, then redeploy.
+
+SEO/social assets live in `demo/app/`: `site.ts` (single source for the origin —
+`NEXT_PUBLIC_SITE_URL`, else `VERCEL_PROJECT_PRODUCTION_URL`, else localhost),
+`icon.svg`, `opengraph-image.tsx`, `sitemap.ts`, `robots.ts`. Two gotchas, both
+hit for real:
+- **Sitemap `<loc>` must be absolute.** Next does *not* resolve sitemap URLs
+  against `metadataBase`; build them with `new URL(route, SITE_URL)`.
+- **`opengraph-image.tsx` runs through satori**, which is stricter than the DOM:
+  every element with >1 child needs an explicit `display`, and any non-ASCII glyph
+  (e.g. the `◆` brand mark) triggers a dynamic font fetch that **fails the build**
+  (`Failed to download dynamic font. Status: 400`). Draw shapes with CSS (the
+  diamond is a rotated square), keep text ASCII.
+
+Tradeoff: on the published dep, local `demo` dev no longer exercises local
+`nextcanvas/src/` changes. To test package changes locally, temporarily swap the
+dep back to `file:../nextcanvas` (rebuild `dist/` first) — just don't commit that
+swap if the demo is what Vercel deploys.
+
+Deploying is safe regardless: `withCanvas` early-returns unless
+`NODE_ENV === 'development'`, and `app/layout.tsx` gates `<NextCanvasOverlay/>`
+the same way, so a prod build emits **no** `data-loc` stamps, no overlay script,
+and no `:3131` reference.
 
 ### Releasing (publish to npm)
 
@@ -363,11 +407,10 @@ using the stock demo `next.config.js`.
 - **Turbopack-on-Windows** is unverified and may still fail for a *different*
   upstream reason (wasm host-imports gap, vercel/next.js#84972). Keep `--webpack`
   on Windows until verified.
-- **The demo still forces `--webpack`** (`demo/package.json` `dev` script) and
-  currently installs the **published** `@rishi-thak/nextcanvas` (not `file:`),
-  which predates this fix. To exercise Turbopack against the fixed package,
-  point the demo at `file:../nextcanvas` (rebuild `dist/` first) or publish a new
-  version, then flip `dev` to `next dev` / `--turbo`.
+- **The demo still forces `--webpack`** (`demo/package.json` `dev` script). It
+  installs the **published** `@rishi-thak/nextcanvas@0.1.0`, which **does**
+  contain this fix (verified: its `exports` map has `"./swc/*"`). So to exercise
+  Turbopack, just run the existing `npm run dev:turbo` — no dep swap needed.
 
 **Rebuild reminder:** `dist/` and `swc-plugin/target/` are gitignored. After
 pulling, run `npm install` (or `npm run build`) inside `nextcanvas/` to rebuild
