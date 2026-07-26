@@ -1,0 +1,160 @@
+# nextcanvas
+
+Turn a locally-running Next.js (App Router) app into an editable canvas.
+Double-click any static text in the browser, type a new value, and the change is
+written straight back into your source file. Next.js Fast Refresh does the rest.
+
+**Dev-only.** Everything is gated behind `NODE_ENV === 'development'` and is a
+complete no-op in production builds.
+
+Requires **Next.js 16.2+** (App Router).
+
+## Setup
+
+```bash
+npm i -D @rishi-thak/nextcanvas
+npx nextcanvas init
+```
+
+`init` wires everything for you — it's idempotent, so it's safe to re-run:
+
+- **wraps your `next.config.{js,mjs,ts}`** export with `withCanvas` (which boots
+  the write-back server and injects the source-map SWC plugin, dev-only), and
+- **mounts `<NextCanvasOverlay/>`** in your root layout.
+
+Then run `npm run dev`, open the app, and double-click any static text. **Zero
+extra config** — the source stamp is an SWC plugin that runs inside Next's own
+compiler, so both webpack and Turbopack work.
+
+### Manual setup
+
+Prefer to wire it by hand? `init` just performs these two edits:
+
+**1. `next.config.js`** — wrap your exported config:
+
+```js
+const { withCanvas } = require('@rishi-thak/nextcanvas/next');
+module.exports = withCanvas({ /* your existing config */ });
+```
+
+**2. `app/layout.tsx`** — mount the overlay:
+
+```tsx
+import { NextCanvasOverlay } from '@rishi-thak/nextcanvas';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        {children}
+        {process.env.NODE_ENV === 'development' && <NextCanvasOverlay />}
+      </body>
+    </html>
+  );
+}
+```
+
+## How it works
+
+```
+double-click text ─▶ overlay reads element's data-loc ─▶ POST :3131/edit
+       ▲                                                        │
+       │                                                        ▼
+  Fast Refresh  ◀──  file rewritten  ◀──  ts-morph AST edit (formatting-safe)
+```
+
+- **Source mapping** — an **SWC plugin** (shipped prebuilt as
+  `swc/nextcanvas_swc.wasm`, injected via `experimental.swcPlugins` by
+  `withCanvas`) stamps `data-loc="<absFile>:<line>:<col>"` onto every host JSX
+  element at compile time. The overlay reads it straight off the DOM — no
+  React-internal fiber reading (which is unreliable: `_debugSource` is not
+  present in current Next/React App Router builds).
+- **Overlay delivery** — served as a raw classic script from the write-back
+  server (`:3131/overlay.js`) and injected by `<NextCanvasOverlay />`, so no bundler
+  ever processes the overlay code.
+- **Write-back** — `ts-morph` performs a formatting-preserving AST edit; your
+  surrounding code and style are untouched.
+- **No WebSocket** — edits are one-way POSTs; the browser update comes free from
+  Fast Refresh.
+
+## Bundler support
+
+The stamp is an **SWC plugin**, so it runs inside Next's own compiler under both
+bundlers — `next/font` and other SWC features keep working.
+
+| Bundler   | Windows                    | macOS / Linux |
+|-----------|----------------------------|---------------|
+| webpack   | ✅                          | ✅             |
+| Turbopack | ⚠️ not yet (see below)      | ✅             |
+
+**Turbopack on Windows** can't execute Wasm SWC plugins yet (upstream:
+[vercel/next.js#84972](https://github.com/vercel/next.js/issues/84972),
+[#78156](https://github.com/vercel/next.js/issues/78156)). The app still runs,
+but nothing gets stamped, so editing is inactive. On Windows, use
+`next dev --webpack`. Turbopack works on macOS/Linux.
+
+## Current scope
+
+- ✅ Static JSX text: `<h1>Hello</h1>`
+- ✅ Text mixed with inline elements: `<p>Hello <strong>world</strong>!</p>` —
+  edit the surrounding text runs; the inline elements are locked and preserved
+- ✅ Bound text — data-driven copy is editable too, not just literal JSX text:
+  `<h3>{speaker.name}</h3>`, `<h1>{cfg.title}</h1>`, `??`/`||` fallbacks,
+  string-literal ternaries, and `.map`/prop-drilled params. This resolves back
+  to wherever the value actually lives — a local array/object, an imported
+  constants module (`lib/site.ts`-style copy), even across files — and rewrites
+  the source there. Targeting is by **value**, not DOM position, so filtered or
+  reordered lists still edit the right entry (a value shared by several entries
+  is refused as ambiguous rather than risk the wrong one). Full details on the
+  demo site's `/docs/bound-text` page — computed access (`items[i]`), calls,
+  and mixed `text {expr}` stay unstamped.
+- ✅ String-literal and bound-identifier attributes (`href`, `src`, `alt`, …)
+- ✅ Inline style editing via a design panel (color, background, font-size,
+  font-weight, text-align, padding)
+- ⚠️ Structure must stay intact during a mixed edit — deleting an inline element
+  or emptying a whole text run is rejected and reverted with a toast
+- ⚠️ Repeated components (same source line via `.map`) edit the shared source,
+  which changes all instances
+
+## Roadmap
+
+- Turbopack-on-Windows once the upstream Wasm-plugin gap closes
+- className / Tailwind-class editing (inline `style` only today)
+- Element move / duplicate / delete
+- Full pan-zoom canvas UI
+
+## Config
+
+- `NEXTCANVAS_PORT` — override the write-back server port (default `3131`).
+  `withCanvas` inlines this into the client automatically, so setting the single
+  env var is enough — no other changes needed.
+
+## Development
+
+The package is written in **TypeScript** (`src/*.ts`) and compiled with `tsc` to
+CommonJS + type declarations in `dist/`, which is what's published and what the
+`exports` map points at.
+
+```bash
+npm install     # installs deps and builds dist/ via the prepare script
+npm run build   # recompile after editing src/
+```
+
+The browser overlay (`src/overlay.ts`) is deliberately module-free so it
+compiles to a plain classic script; everything else compiles to normal CommonJS
+modules.
+
+### The SWC plugin (Rust)
+
+The `data-loc` stamp lives in `swc-plugin/` (Rust) and ships **prebuilt** as
+`swc/nextcanvas_swc.wasm` — consumers need no Rust. To rebuild it you need the
+Rust toolchain and the `wasm32-wasip1` target:
+
+```bash
+rustup target add wasm32-wasip1
+npm run build:wasm    # cargo build + copy the .wasm into swc/
+```
+
+`swc_core` is pinned to the version Next's runtime embeds (see the comment in
+`swc-plugin/Cargo.toml`); bump it only when targeting a newer Next whose runtime
+rejects the current ABI.

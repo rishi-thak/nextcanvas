@@ -66,7 +66,7 @@ export const COPY_TABS: CopyTab[] = [
     id: 'agent',
     label: 'agent',
     action: 'copy prompt',
-    hint: 'a ready-to-paste prompt for claude code, cursor, or codex',
+    hint: 'a ready-to-paste prompt for your favorite coding agent',
     payload: AGENT_PROMPT,
   },
   {

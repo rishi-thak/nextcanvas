@@ -97,6 +97,9 @@ Fast Refresh then re-renders. Everything is dev-only and a no-op in production.
 
 ## Layout
 
+- `README.md` — user-facing package overview at the **repo root** (GitHub landing).
+  `nextcanvas/README.md` is a symlink to it so `npm publish` still ships the
+  readme in the tarball.
 - `nextcanvas/` — the publishable package (the actual product). **TypeScript**:
   source in `nextcanvas/src/*.ts`, compiled by `tsc` to CommonJS + `.d.ts` in
   `nextcanvas/dist/`. The published `exports`/`files` point at `dist/`. There
@@ -296,7 +299,7 @@ Pieces:
 - **`src/cli.ts`** (`npx nextcanvas init`) — codemod that mounts
   `<NextCanvasOverlay/>` in the root layout, and checks the config/`.babelrc`.
 
-Consuming-app wiring is now two one-time steps (see `nextcanvas/README.md`):
+Consuming-app wiring is now two one-time steps (see `README.md`):
 `withCanvas()` in `next.config.js` (which auto-injects the SWC plugin + boots the
 server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
 
