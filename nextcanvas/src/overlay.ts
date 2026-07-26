@@ -713,6 +713,18 @@ whenBodyReady(function initNextCanvas(): void {
       font-size: 14px; padding: 0 2px; line-height: 1;
     }
     .nc-clear:hover { color: #f5f5f7; }
+
+    /* Narrow screens: the bar is a single fixed row anchored bottom-right, so
+       once its content is wider than the viewport its left half runs off
+       screen. Pin both edges to cap width at the viewport and let it wrap. */
+    @media (max-width: 600px) {
+      .nc-root { left: 16px; right: 16px; }
+      .nc-bar { flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
+      .nc-sep { display: none; }
+      .nc-panel {
+        left: 16px; right: 16px; width: auto; max-width: none;
+      }
+    }
   `;
   document.head.appendChild(style);
 

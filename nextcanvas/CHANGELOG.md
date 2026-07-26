@@ -5,6 +5,14 @@ release-tag dates; versions match `package.json` / npm.
 
 ## Unreleased
 
+## 0.2.1 — 2026-07-26
+
+- The editing toolbar no longer runs off small screens. It's a fixed row
+  anchored to the bottom-right, so once its controls were wider than the
+  viewport its left half slid off the edge with no way to reach it. On viewports
+  600px and narrower the bar now stays pinned within both margins and wraps onto
+  multiple rows; desktop is unchanged.
+
 ## 0.2.0 — 2026-07-21
 
 - Bound text that can't actually be written back is no longer offered for
