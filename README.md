@@ -1,13 +1,26 @@
 # nextcanvas
+**TLDR: here you'll learn about the motivation behind nextcanvas, how to set it up, etc. if you want this to be as easy as possible, here's the official landing page, docs, prettier instructions: <https://nextcanvas.rishithakkar.com>**
 
-Turn a locally-running Next.js (App Router) app into an editable canvas.
+Hi everyone! My name's Rishi, I built nextcanvas -- it turns a locally-running Next.js app into an editable canvas.
+I found this gap while doing some contracted web-dev work, and the small text edits I wanted to make were handled 2 ways:
+- searching for the text in vscode and replacing it inline
+- sometimes just asking Claude (when I wasn't sure what to write)
+
+Since the main workflow of mine was the first, coming back from the dev server -> vscode (then searching and replacing) felt really inefficient. 
+
+Below, I talk about how nextcanvas works, how to set it up, etc....
+
+***If you see something I'm missing, please open a PR!***
+
+Here's how it works:
 Double-click any static text in the browser, type a new value, and the change is
 written straight back into your source file. Next.js Fast Refresh does the rest.
 
+Since at the end of the day, this is a dev tool, it's:
 **Dev-only.** Everything is gated behind `NODE_ENV === 'development'` and is a
 complete no-op in production builds.
 
-Requires **Next.js 16.2+** (App Router).
+It does require **Next.js 16.2+** (App Router). More support for more versions of Next.js & other frameworks coming soon.
 
 ## Setup
 
