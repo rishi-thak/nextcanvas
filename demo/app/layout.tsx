@@ -12,6 +12,13 @@ export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: TITLE,
   description: DESCRIPTION,
+  // The deployment is reachable at BOTH nextcanvas.vercel.app and the custom
+  // domain (Vercel serves the project subdomain with no redirect), so the same
+  // pages exist on two hosts. Resolved against metadataBase, this emits an
+  // absolute canonical pointing at SITE_URL from *either* host, which is what
+  // makes search engines collapse them into one. og:url alone does not — it is
+  // read by social scrapers, not used for canonicalisation.
+  alternates: { canonical: '/' },
   openGraph: {
     type: 'website',
     siteName: 'nextcanvas',

@@ -170,6 +170,21 @@ SEO/social assets live in `demo/app/`: `site.ts` (single source for the origin �
 hit for real:
 - **Sitemap `<loc>` must be absolute.** Next does *not* resolve sitemap URLs
   against `metadataBase`; build them with `new URL(route, SITE_URL)`.
+- **Every page needs its OWN `alternates.canonical` — never rely on the root
+  layout's.** The site is served on two hosts: the custom domain *and*
+  `nextcanvas.vercel.app` (Vercel serves the project subdomain with **no**
+  redirect — verified HTTP 200, identical HTML), so every page exists twice and
+  needs a canonical to collapse them. `og:url` does not do this; it's read by
+  social scrapers, not used for canonicalisation. But `alternates` is
+  **inherited** through Next's metadata merge, so a lone `canonical: '/'` in
+  `app/layout.tsx` propagates to every child page that doesn't override it —
+  all 8 docs pages would have declared themselves duplicates of the homepage
+  and risked being dropped from the index. That is strictly worse than no
+  canonical. The root layout sets `'/'` (for `app/page.tsx`, which defines no
+  metadata of its own) and **each docs page sets its own route**. When adding a
+  page, add its `alternates: { canonical: '/its/route' }` too, then verify with
+  a build: `grep -o 'rel="canonical" href="[^"]*"' .next/server/app/**/*.html`
+  — every route must print its own URL, not `/`.
 - **`opengraph-image.tsx` runs through satori**, which is stricter than the DOM:
   every element with >1 child needs an explicit `display`, and any non-ASCII glyph
   (e.g. the `◆` brand mark) triggers a dynamic font fetch that **fails the build**

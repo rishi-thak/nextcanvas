@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { Pager } from '../Pager';
 
 export const metadata: Metadata = {
+  alternates: { canonical: '/docs/toolbar' },
   title: 'Controls & modes',
 };
 

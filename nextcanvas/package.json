@@ -5,6 +5,32 @@
     "access": "public"
   },
   "description": "Turn a locally-running Next.js app into an editable canvas. Double-click text in the browser, edit it, and the source file is rewritten.",
+  "keywords": [
+    "nextjs",
+    "next",
+    "react",
+    "visual-editor",
+    "devtools",
+    "developer-tools",
+    "app-router",
+    "swc",
+    "swc-plugin",
+    "wysiwyg",
+    "inline-editing",
+    "live-editing",
+    "ast",
+    "codemod",
+    "ts-morph",
+    "dx"
+  ],
+  "homepage": "https://nextcanvas.rishithakkar.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rishi-thak/nextcanvas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rishi-thak/nextcanvas/issues"
+  },
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

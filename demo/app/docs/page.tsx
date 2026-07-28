@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { Pager } from './Pager';
 
 export const metadata: Metadata = {
+  alternates: { canonical: '/docs' },
   title: 'Welcome',
 };
 
