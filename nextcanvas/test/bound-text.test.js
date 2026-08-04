@@ -247,10 +247,12 @@ test('cross-file: resolves a relatively-imported array and edits the DATA file',
   assert.equal(result.ok, true, result.error);
   assert.match(after['data.ts'], /name: 'Linus T\.'/); // data file rewritten
   assert.equal(after['page.tsx'], page); // page untouched
-  // Owning file reported. Compare realpaths: the server resolves symlinks as
-  // part of path containment, and macOS's tmpdir is itself a /var → /private
-  // symlink, so the literal strings can legitimately differ.
-  assert.equal(result.fileName, fs.realpathSync(paths['data.ts']));
+  // Owning file reported. Compare realpaths, normalising slashes: the server
+  // resolves symlinks as part of path containment (macOS's tmpdir is itself a
+  // /var → /private symlink), and ts-morph reports forward-slash paths while
+  // Windows `realpathSync` returns backslashes — same file, different spelling.
+  const norm = (p) => p.replace(/\\/g, '/');
+  assert.equal(norm(result.fileName), norm(fs.realpathSync(paths['data.ts'])));
 });
 
 test('cross-file: direct object imported from another module', () => {
