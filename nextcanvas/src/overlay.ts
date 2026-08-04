@@ -77,8 +77,10 @@ interface StyleChange {
 }
 
 type Change = TextChange | AttrChange | StyleChange;
-// Text and attribute edits share the autosave/manual-staging lifecycle (style
-// edits always write immediately, so they bypass these helpers).
+// Text and attribute edits share the DOM-restore helpers, which read/write the
+// element's content or attributes. Style edits restore through the inline
+// `style` property instead, so they are handled separately in `applyChange` —
+// but all three kinds ride the same undo/redo stack and manual-mode staging.
 type EditChange = TextChange | AttrChange;
 
 type NextCanvasMode = 'autosave' | 'manual';
@@ -197,14 +199,28 @@ whenBodyReady(function initNextCanvas(): void {
 
   const undoStack: Change[] = [];
   const redoStack: Change[] = [];
-  // Manual-mode staging, keyed by loc(+attr) so one element can stage its text
-  // AND several attributes independently. `oldRuns` holds the original text runs
-  // (text edits) or a single original value (attr edits, in `oldRuns[0]`).
+  // Manual-mode staging, keyed by loc + slot so one element can stage its text,
+  // several attributes AND several style properties independently. `oldRuns`
+  // holds the original text runs (text edits), or a single original value in
+  // `oldRuns[0]` (attr edits: the attribute's value; style edits: the element's
+  // prior *inline* value for that property, '' when it wasn't inline-set).
   interface StagedEdit {
     el: HTMLElement;
     source: NextCanvasSource;
-    kind: 'text' | 'attr';
+    kind: 'text' | 'attr' | 'style';
     attr?: string;
+    /** Set for a style edit: the camelCase property this entry stages. */
+    property?: string;
+    /**
+     * Set for a style edit: the latest value the user authored for `property`.
+     *
+     * Deliberately NOT read back off the DOM at Save time. The browser
+     * normalises an inline value (`#ff00aa` becomes `rgb(255, 0, 170)`), so
+     * reading it back would write a different string than autosave writes for
+     * the very same click — and in a Tailwind project would produce
+     * `text-[rgb(255,_0,_170)]` instead of `text-[#ff00aa]`.
+     */
+    value?: string;
     oldRuns: string[];
     mixed: boolean;
     // Set for a bound-identifier attr, carrying the user's all/one choice so a
@@ -216,8 +232,16 @@ whenBodyReady(function initNextCanvas(): void {
     textBound?: { expr: string; index: number };
   }
   const staged = new Map<string, StagedEdit>();
-  function stageKey(source: NextCanvasSource, attr?: string): string {
-    return `${source.fileName}:${source.lineNumber}:${source.columnNumber}:${attr ?? '#text'}`;
+  /**
+   * `slot` distinguishes what on the element is being staged: an attribute name,
+   * `#text`, or `#style:<property>`. Style slots are prefixed so a style property
+   * can never collide with an attribute of the same name (`color` is both).
+   */
+  function stageKey(source: NextCanvasSource, slot?: string): string {
+    return `${source.fileName}:${source.lineNumber}:${source.columnNumber}:${slot ?? '#text'}`;
+  }
+  function styleSlot(property: string): string {
+    return `#style:${property}`;
   }
   // In-flight text-edit snapshot, captured on dblclick: the original text runs
   // and the inline child elements (to detect structural changes on commit).
@@ -897,11 +921,13 @@ whenBodyReady(function initNextCanvas(): void {
   const badgeEl = q('.nc-badge');
 
   // A staged edit is dirty when the element's current value differs from its
-  // staged original — attrs compare exactly, text runs compare whitespace-normed.
+  // staged original — attrs and inline style values compare exactly, text runs
+  // compare whitespace-normed.
   function stagedIsDirty(s: StagedEdit): boolean {
-    return s.attr
-      ? (s.el.getAttribute(s.attr) ?? '') !== s.oldRuns[0]
-      : !runsEqual(readRuns(s.el), s.oldRuns);
+    if (s.kind === 'attr') return (s.el.getAttribute(s.attr!) ?? '') !== s.oldRuns[0];
+    // Style compares the authored value, not the DOM — see `StagedEdit.value`.
+    if (s.kind === 'style') return (s.value ?? '') !== s.oldRuns[0];
+    return !runsEqual(readRuns(s.el), s.oldRuns);
   }
 
   function stagedDirtyCount(): number {
@@ -1038,27 +1064,60 @@ whenBodyReady(function initNextCanvas(): void {
     if (c.kind === 'attr') c.el.setAttribute(c.attr, c[to]);
     else applyDom(c.el, c[to], c.mixed);
   }
-  function keyFor(c: EditChange): string {
-    return c.kind === 'attr'
-      ? stageKey(c.source, c.attr)
-      : stageKey(c.source);
+  function keyFor(c: Change): string {
+    if (c.kind === 'attr') return stageKey(c.source, c.attr);
+    if (c.kind === 'style') return stageKey(c.source, styleSlot(c.property));
+    return stageKey(c.source);
   }
-  function stageChange(c: EditChange): void {
+  function stageChange(c: Change): void {
     const key = keyFor(c);
-    if (staged.has(key)) return;
-    staged.set(
-      key,
-      c.kind === 'attr'
-        ? { el: c.el, source: c.source, kind: 'attr', attr: c.attr, oldRuns: [c.before], mixed: false, bound: c.bound, scope: c.scope }
-        : { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed, textBound: c.textBound }
-    );
+    const prior = staged.get(key);
+    if (prior) {
+      // Keep the FIRST staged original — it is what Save diffs against, so a
+      // second edit to the same slot must not overwrite it with an intermediate.
+      // A style entry does still track the newest authored value, since that is
+      // what gets written rather than anything read back off the element.
+      if (prior.kind === 'style' && c.kind === 'style') prior.value = c.after;
+      return;
+    }
+    let entry: StagedEdit;
+    if (c.kind === 'attr') {
+      entry = { el: c.el, source: c.source, kind: 'attr', attr: c.attr, oldRuns: [c.before], mixed: false, bound: c.bound, scope: c.scope };
+    } else if (c.kind === 'style') {
+      entry = { el: c.el, source: c.source, kind: 'style', property: c.property, value: c.after, oldRuns: [c.before], mixed: false };
+    } else {
+      entry = { el: c.el, source: c.source, kind: 'text', oldRuns: c.before, mixed: c.mixed, textBound: c.textBound };
+    }
+    staged.set(key, entry);
+  }
+
+  /**
+   * How long the inline preview stays up after a class-mode write.
+   *
+   * In a Tailwind project the server writes a utility class, but the class has
+   * no CSS until Tailwind rescans the file and Fast Refresh re-renders. The
+   * inline style applied for instant feedback must therefore outlive the write —
+   * and must then be removed, because an inline value outranks any class and
+   * would leave the element permanently pinned to the preview.
+   */
+  const CLASS_HANDOFF_MS = 600;
+
+  /**
+   * Drop the inline preview for `property` once the written class has had time
+   * to take effect. No-op when the element is gone (React replaced it — the
+   * class is authoritative at that point anyway).
+   */
+  function handOffToClass(el: HTMLElement, property: string): void {
+    setTimeout(() => {
+      if (el.isConnected) applyInlineStyle(el, property, '');
+    }, CLASS_HANDOFF_MS);
   }
 
   async function writeStyle(
     source: NextCanvasSource,
     property: string,
     value: string
-  ): Promise<{ ok: boolean; error?: string }> {
+  ): Promise<{ ok: boolean; error?: string; mode?: 'class' | 'inline' }> {
     try {
       const res = await fetch(STYLE_SERVER, {
         method: 'POST',
@@ -1109,11 +1168,15 @@ whenBodyReady(function initNextCanvas(): void {
     refreshUI();
   }
 
-  // Commit one style property change. Unlike text, style edits always write to
-  // source immediately (no manual staging in v1), but they DO ride the shared
-  // undo/redo stack. `before` is the element's prior *inline* value ('' if the
-  // property wasn't inline-set), so undo restores it — including removing an
-  // inline value we introduced.
+  // Commit one style property change. Style edits ride the shared undo/redo
+  // stack and follow the same autosave/manual lifecycle as text and attributes:
+  // autosave writes through immediately, manual stages behind the Save button.
+  // `before` is the element's prior *inline* value ('' if the property wasn't
+  // inline-set), so undo restores it — including removing a value we introduced.
+  //
+  // In manual mode the inline preview is what the user sees until Save, and it
+  // is also what `stagedIsDirty` diffs, so it must NOT be handed off to a class
+  // before the write lands — `save()` does the handoff instead.
   function commitStyle(
     el: HTMLElement,
     source: NextCanvasSource,
@@ -1126,9 +1189,22 @@ whenBodyReady(function initNextCanvas(): void {
     const change: StyleChange = { kind: 'style', el, source, property, before, after };
     undoStack.push(change);
     redoStack.length = 0;
+
+    if (mode === 'manual') {
+      stageChange(change);
+      toast('Staged — click Save to write to code');
+      refreshUI();
+      return;
+    }
+
     writeStyle(source, property, after).then((r) => {
       if (r.ok) {
-        toast('Styled — Fast Refresh will update the view');
+        if (r.mode === 'class') {
+          toast('Styled with a Tailwind class — Fast Refresh will update the view');
+          handOffToClass(el, property);
+        } else {
+          toast('Styled — Fast Refresh will update the view');
+        }
       } else {
         toast(r.error || 'Style edit rejected', true);
         if (el.isConnected) applyInlineStyle(el, property, before);
@@ -1142,34 +1218,43 @@ whenBodyReady(function initNextCanvas(): void {
   }
 
   // Roll `change` to one of its ends: `before` when undoing, `after` when
-  // redoing. Style edits always write to source (they don't participate in
-  // manual-mode staging); text/attr edits write in autosave and (un)stage in
-  // manual mode.
+  // redoing. All three kinds behave the same way: in autosave the roll is
+  // written to source, in manual mode it only (un)stages — undoing an unsaved
+  // edit back onto its staged original drops it from the Save batch entirely,
+  // rather than writing a reversal the source never saw.
   function applyChange(change: Change, to: 'before' | 'after'): void {
     if (change.el.isConnected) {
       if (change.kind === 'style')
         applyInlineStyle(change.el, change.property, change[to]);
       else applyChangeDom(change, to);
     }
-    if (change.kind === 'style') {
-      writeStyle(change.source, change.property, change[to]).then((r) => {
-        if (!r.ok) toast(r.error || 'Style change failed', true);
-      });
-      if (selected === change.el) populatePanel();
+    if (change.kind === 'style' && selected === change.el) populatePanel();
+
+    if (mode === 'autosave') {
+      if (change.kind === 'style') {
+        writeStyle(change.source, change.property, change[to]).then((r) => {
+          if (!r.ok) {
+            toast(r.error || 'Style change failed', true);
+          } else if (r.mode === 'class' && change.el.isConnected) {
+            handOffToClass(change.el, change.property);
+          }
+        });
+      } else {
+        const write = to === 'before' ? writeReverse : writeForward;
+        write(change).then((r) => {
+          if (!r.ok) toast(r.error || 'Change failed', true);
+        });
+      }
       return;
     }
-    if (mode === 'autosave') {
-      const write = to === 'before' ? writeReverse : writeForward;
-      write(change).then((r) => {
-        if (!r.ok) toast(r.error || 'Change failed', true);
-      });
-    } else if (to === 'before') {
+
+    if (to === 'before') {
       const key = keyFor(change);
       const s = staged.get(key);
       const reverted =
-        change.kind === 'attr'
-          ? s != null && change.before === s.oldRuns[0]
-          : s != null && runsEqual(change.before, s.oldRuns);
+        change.kind === 'text'
+          ? s != null && runsEqual(change.before, s.oldRuns)
+          : s != null && change.before === s.oldRuns[0];
       if (reverted) staged.delete(key);
     } else {
       stageChange(change);
@@ -1194,17 +1279,40 @@ whenBodyReady(function initNextCanvas(): void {
 
   async function save(): Promise<void> {
     if (mode !== 'manual') return;
-    const jobs: Array<() => Promise<{ ok: boolean; error?: string }>> = [];
-    staged.forEach((s) => {
+    const jobs: Array<{
+      key: string;
+      run: () => Promise<{ ok: boolean; error?: string }>;
+    }> = [];
+    staged.forEach((s, key) => {
       if (!stagedIsDirty(s)) return;
-      if (s.attr) {
-        const cur = s.el.getAttribute(s.attr) ?? '';
-        const attr = s.attr;
+      if (s.kind === 'attr') {
+        const cur = s.el.getAttribute(s.attr!) ?? '';
+        const attr = s.attr!;
         const { bound, scope } = s;
-        jobs.push(() => writeAttr(s.source, attr, s.oldRuns[0], cur, bound, scope));
+        jobs.push({
+          key,
+          run: () => writeAttr(s.source, attr, s.oldRuns[0], cur, bound, scope),
+        });
+      } else if (s.kind === 'style') {
+        const property = s.property!;
+        const cur = s.value ?? '';
+        jobs.push({
+          key,
+          run: async () => {
+            const r = await writeStyle(s.source, property, cur);
+            // The inline preview held the value while it was staged; now that a
+            // class carries it, drop the preview or it outranks the class forever.
+            if (r.ok && r.mode === 'class' && s.el.isConnected)
+              handOffToClass(s.el, property);
+            return r;
+          },
+        });
       } else {
         const cur = readRuns(s.el);
-        jobs.push(() => writeText(s.source, s.oldRuns, cur, s.mixed, s.textBound));
+        jobs.push({
+          key,
+          run: () => writeText(s.source, s.oldRuns, cur, s.mixed, s.textBound),
+        });
       }
     });
     if (jobs.length === 0) {
@@ -1214,19 +1322,24 @@ whenBodyReady(function initNextCanvas(): void {
     let ok = 0;
     let failed = 0;
     for (const job of jobs) {
-      const r = await job();
-      if (r.ok) ok++;
-      else {
+      const r = await job.run();
+      if (r.ok) {
+        ok++;
+        // Only a landed write leaves the stage. A failed one (server briefly
+        // down, stale source) stays staged so Save can retry — clearing it
+        // would silently drop the user's change while the DOM still shows it.
+        staged.delete(job.key);
+      } else {
         failed++;
         toast(r.error || 'Save failed', true);
       }
     }
-    staged.clear();
+    if (failed === 0) staged.clear(); // drop clean (non-dirty) leftovers too
     undoStack.length = 0;
     redoStack.length = 0;
     toast(
       failed
-        ? `Saved ${ok}, ${failed} failed`
+        ? `Saved ${ok} — ${failed} failed (kept staged; fix and Save again)`
         : `Saved ${ok} change${ok === 1 ? '' : 's'}`
     );
     refreshUI();

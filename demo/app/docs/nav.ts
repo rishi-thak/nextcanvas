@@ -28,6 +28,8 @@ export const DOCS_NAV: DocsGroup[] = [
     title: 'Reference',
     links: [
       { href: '/docs/what-works', label: 'What you can edit' },
+      { href: '/docs/alternatives', label: 'Alternatives' },
+      { href: '/docs/security', label: 'Security & privacy' },
     ],
   },
 ];

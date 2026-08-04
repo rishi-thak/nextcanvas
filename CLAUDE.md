@@ -75,18 +75,116 @@ an agent can be pointed at to install nextcanvas.
 - `/skill.md` is served as `text/plain` so it renders in a browser rather than
   downloading, and is `force-static`.
 
+The site also serves **`/llms.txt`** (`demo/app/llms.txt/route.ts`), the
+llmstxt.org convention — one markdown file telling a language model what the
+project is and where the docs are. Same shape as `skill.md`: `text/plain`,
+`force-static`, `VERSION` from `agent-setup.ts`, URLs from `SITE_URL`.
+
+- **Three surfaces now describe capabilities and must move together**:
+  `/skill.md`, `/llms.txt`, and `demo/app/docs/`. A capability change touches all
+  three — `llms.txt` carries both a "What it can edit" and a "What it cannot
+  edit" list, and a stale one makes a model recommend the tool for a job it
+  can't do.
+- **`llms.txt` deliberately includes a "Not a fit for" section.** The
+  highest-volume question in this space — letting non-technical teammates edit a
+  *deployed* site — has a correct answer that is not this tool (it's dev-only and
+  localhost-only). Naming that boundary is the point, not a hedge: it keeps the
+  recommendation trustworthy for the narrow case that does fit. Same reasoning
+  drives `demo/app/docs/alternatives/page.tsx`, which compares nextcanvas to
+  Onlook and Editability and leads with where nextcanvas is the wrong choice.
+  Keep both honest; an overselling comparison page is worth less than none.
+- **New docs routes must be added to `DOCS_NAV`** (`demo/app/docs/nav.ts`) —
+  `sitemap.ts` derives from it, so a page missing from the nav is also missing
+  from the sitemap. Wire the `Pager` on the neighbouring page too, and give the
+  new page its own `alternates.canonical`.
+
 ## Maintaining docs (STRICT — do it unprompted)
 
 - **When you add or change a user-facing feature, update `demo/app/docs/` in the
   same turn** — how-to pages (`text`, `bound-text`, `attributes`, `styles`,
-  `toolbar`), the reference table (`what-works`), and Welcome if the feature is
-  a top-level capability. Do not wait to be asked.
+  `toolbar`), the reference table (`what-works`), the `security` page (when the
+  change touches the request gates / env vars / containment), and Welcome if the
+  feature is a top-level capability. Do not wait to be asked.
 - Write for **operators using the overlay**, not for package internals (no SWC /
   ts-morph / stamp implementation detail unless it changes what they can click).
 - Keep pages consistent: if a shape becomes editable, remove it from “won’t edit”
   lists; if a shape is newly blocked, add it. Stale docs are a bug.
 - Docs live under the demo app (`/docs`); editing them is not a version-control
   action — same gate as CLAUDE.md (commit only when explicitly asked).
+
+## Security model (STRICT — do not weaken)
+
+The write-back server writes files to disk in response to browser requests, so
+it is a drive-by target: any site open in the dev's browser can POST to
+`localhost:3131`. `src/security.ts` holds the gates; `server.ts`'s `handler`
+enforces them **before** reading the body, and every `apply*` entry point
+re-validates the path (defence in depth — the functions are also called directly
+from tests and could be reused). **Do not route a new write path around
+`validateEditPath`, and do not relax the origin/host gate to `*`.**
+
+- **Bind is loopback-only** (`HOST`, default `127.0.0.1`); `NEXTCANVAS_HOST`
+  opens it (e.g. `0.0.0.0`) for LAN/phone testing — the request gates still run.
+- **Origin/Host gate** (`checkRequestSource`): only local origins
+  (localhost / 127.0.0.1 / ::1 / *.localhost / RFC-1918 private LAN) may call
+  the write endpoints. **No Origin header is allowed** (non-browser CLI on the
+  same machine, which could already write files); `Origin: null` is refused. The
+  Host check defeats DNS rebinding. `NEXTCANVAS_ALLOWED_ORIGINS` (comma-separated
+  exact origins) extends both lists for forwarded dev (Codespaces, custom hosts).
+- **CORS reflects the validated origin, never `*`** — a refused page can't read
+  responses even if a request slipped through. Refusals (403) carry no CORS
+  headers at all.
+- **Path containment** (`validateEditPath`): fileName must `realpath` (symlinks
+  followed) to a real file inside `projectRoot()` — no `..` escape, no symlink
+  out, no `node_modules`, no `.d.ts`, source extensions only
+  (.ts/.tsx/.js/.jsx/.mjs/.cjs). `resolveModuleFile.accept` runs the SAME check,
+  since a resolved import may itself be written (bound-value owning files are
+  `saveSync`'d). Root defaults to the enclosing **git repo** (monorepo shared
+  components live outside the Next app dir but inside the repo), falls back to
+  cwd; `NEXTCANVAS_ROOT` overrides. Relative fileNames (Turbopack stamps) resolve
+  against **cwd**, not the (possibly wider) containment root.
+- **Payload validation**: `newText`/`oldText`/`expr`/`property` are type-checked
+  (a missing `newText` used to write the string `"undefined"` into source);
+  `attrName` must be in the six-name whitelist (kept in sync with
+  `EDITABLE_ATTRS` in `swc-plugin/src/lib.rs`); style `property` is regex-guarded;
+  segments are shape-checked; oversized bodies get a real `413`; `/resolve`
+  batches are capped (`MAX_RESOLVE_ITEMS`).
+- **Tests**: `test/security.test.js` covers all of the above (origin/host units,
+  path containment incl. a symlink escape, the whitelist, and an end-to-end
+  handler test on an ephemeral port asserting 403 for evil origin/host and a
+  reflected-origin 200 for the local overlay). The other test files set
+  `NEXTCANVAS_ROOT = os.tmpdir()` at the top so their temp-file edits pass
+  containment — keep that line when adding a test file that writes temp sources.
+  Compare reported `fileName` against `fs.realpathSync(...)`, not the raw temp
+  path (macOS `/var`→`/private/var`).
+
+## Write safety (corruption + concurrency — do not weaken)
+
+The tool rewrites the developer's real source; a bad edit is a corrupted file,
+the one failure mode with lasting blast radius. Three guards, all in `server.ts`:
+
+- **Every save goes through `trySave` (never a bare `saveSync`).** It re-parses
+  the edited in-memory buffer with `parsesClean` (`ts.createSourceFile`, TSX,
+  syntactic-only — cheap, ignores type errors) and **refuses to write** if the
+  result wouldn't parse, returning `{ ok: false, error: CORRUPT_MSG }` and
+  leaving the file untouched. When adding a new write path, call `trySave(sf)`,
+  not `sf.saveSync()`. `parsesClean` is exported for tests.
+- **User text is escaped for its context before it reaches source.**
+  `encodeJsxText` (`& < > { }`) for JSX text runs, `encodeJsxAttrValue`
+  (`&quot;` etc.) for double-quoted attribute literals — the scope-one bound-attr
+  inline used to `JSON.stringify`, which writes `href="a\"b"` (invalid JSX; JSX
+  attrs take no backslash escapes). Both in `src/entities.ts`. `trySave` is the
+  backstop if a future path forgets.
+- **The single-text path writes via a raw `replaceText` splice on the node's
+  FULL span** (`getFullStart`/`getEnd`/`getFullText`), NOT `replaceWithText`:
+  the latter runs ts-morph structural manipulation that reindents surrounding
+  lines and mixes spaces into tab-indented JSX. Raw splice touches only the
+  node's bytes, matching the mixed-children path. Don't revert it.
+- **All mutating edits run through `serializeWrite`** (one global promise queue).
+  The `apply*` calls are synchronous today, so Node already runs them without
+  interleaving — but the queue makes the no-lost-update guarantee explicit and
+  survives someone later adding an `await` to a write path. `/resolve` (dry-run,
+  no writes) is not queued. `concurrency.test.js` pins the property: overlapping
+  edits to one file must all survive.
 
 ## What this is
 
@@ -262,11 +360,16 @@ Verify the run under the repo's **Actions** tab, then confirm on npm:
 
 ### Testing (browser round-trip)
 
-There is no unit-test suite. Verification is done by driving a real browser with
-Playwright, because the core behavior (fiber/DOM reads, contentEditable,
-file write-back) only exists at runtime. Playwright is installed at the project
-root. A test script must set `NODE_PATH` to the root `node_modules` since scripts
-run from `$CLAUDE_JOB_DIR/tmp`:
+There **is** a unit/integration suite now (`npm test` inside `nextcanvas/`, run
+in CI across Linux/macOS/Windows — see the Testing section near the end of this
+file). It covers the server write-back, security gates, entities, Tailwind
+mapping, the corruption guard, write serialization, **and the overlay** (jsdom,
+loading the real compiled `dist/overlay.js`). Use it as the first line of
+defence. Browser Playwright round-trips remain the way to verify things only
+observable at runtime (real layout, Fast Refresh, the SWC stamp under an actual
+bundler — the jsdom overlay tests mock the network and have no layout engine).
+Playwright is installed at the project root; a script must set `NODE_PATH` to the
+root `node_modules` since scripts run from `$CLAUDE_JOB_DIR/tmp`:
 
 ```
 NODE_PATH="<root>/node_modules" node <script>.js
@@ -298,15 +401,24 @@ Pieces:
   JSX elements, **plain-identifier components** (`<Reveal as="h2">…`, `<Link>…`),
   and **one-level member tags** (`motion.h1`, …). Component text/bound-text is
   wrapped in a stamped `<span>` so non-forwarding wrappers still expose a DOM
-  stamp — see the component-stamping constraint. Because it runs *inside* SWC, it
-  works under both the webpack (next-swc) and Turbopack pipelines. Injected via
+  stamp — see the component-stamping constraint. **Interpolated `{expr}` children
+  are wrapped in a locked `display:contents` `<span data-nc-expr>`** so text like
+  `Hello {name}!` becomes editable (static runs) while the value is preserved —
+  see the interpolated-text constraint. Because it runs *inside* SWC, it works
+  under both the webpack (next-swc) and Turbopack pipelines. Injected via
   `experimental.swcPlugins` by `withCanvas`.
 - **`src/overlay.ts`** — vanilla-DOM client (no React). Highlights text elements,
   makes them `contentEditable` on double-click, reads `data-loc` off the DOM, and
   POSTs `{fileName, lineNumber, oldText, newText}` to the server on commit.
-- **`src/server.ts`** — dev-only HTTP server on :3131. `applyEdit()` uses
-  `ts-morph` to do a formatting-preserving edit of the JSX text node, then
-  `saveSync()`. Also serves the compiled `overlay.js` raw at `/overlay.js`.
+- **`src/server.ts`** — dev-only HTTP server on :3131 (loopback by default).
+  `applyEdit()` uses `ts-morph` to do a formatting-preserving edit of the JSX
+  text node, then `saveSync()`. Also serves the compiled `overlay.js` raw at
+  `/overlay.js`. `handler` gates every request through `src/security.ts`.
+- **`src/security.ts`** — the request/path gates (origin+host allowlist, path
+  containment). See the Security model section above; do not bypass it.
+- **`src/entities.ts`** — HTML-entity decode (for matching source against the
+  browser's decoded textContent) + JSX-special encode (on write). Used by the
+  text/segment paths in `server.ts`.
 - **`src/next.ts`** (`withCanvas`) — wraps the user's Next config; in dev it
   boots the server AND injects the SWC plugin into `experimental.swcPlugins`.
   **`src/index.ts`** exports `<NextCanvasOverlay/>`, which injects a
@@ -365,9 +477,27 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
   (`q={f.q}` inside `faqs.map`). Reserved names (`children`, `className`, `key`,
   `ref`, …) stay unstamped. Inert siblings `{cond && <el/>}` next to a bound
   expr are ignored for the sole-child check; a bound expr among other siblings
-  is wrapped in a stamped `<span>` (dangling wrap). Computed `{items[i].x}`,
-  calls `{fn().y}`, and text mixed with an expression (`Hi {name}`) stay
-  unstamped. See the dedicated bound-text subsection.
+  is wrapped in a stamped `<span>` (dangling wrap). Computed `{items[i].x}` and
+  calls `{fn().y}` are not resolvable as bound values — but when they sit next to
+  static text they are **preserve-wrapped** (locked, not made editable) so the
+  surrounding copy is still editable (see the interpolated-text constraint). See
+  the dedicated bound-text subsection.
+- **Interpolated text (`Hello {name}!`) is made editable by wrapping each expr
+  child in a locked `display:contents` `<span data-nc-expr>` at compile time.**
+  The wrap runs in the SAME loop as the dangling bound-expr wrap
+  (`visit_mut_jsx_element` in `lib.rs`), gated on `has_nonws_text` (real static
+  copy present, ignoring exprs). A **bound** expr child still gets the
+  `data-nc-text-bound` span (its value is editable); every **other** expr child
+  (`{name}`, `{count}`, `{a && <b/>}`, computed, call) gets the plain
+  `data-nc-expr` span — no `data-loc`, so the value itself is NOT offered, only
+  preserved. After wrapping, `has_editable_text` sees text + elements and the
+  parent gets a mixed-text stamp; the server's segment path already skips
+  non-`JSXText` children, so it needs no change (the wrapper only exists in the
+  compiled DOM, never the source file). An expr-only element (`<p>{name}</p>`,
+  no static words) is NOT wrapped — it stays a sole-bound-text candidate or
+  unstamped, so it correctly does not outline. `display:contents` keeps the span
+  layout-neutral (same reasoning as the component-text wrap). This is what makes
+  the affordance honest: only elements with editable static copy get outlined.
 - **`fiber._debugSource` is NOT available** in current Next App Router / React
   dev builds. Do not try to resolve source location from React internals — that
   is why source mapping uses the compile-time `data-loc` stamp.
@@ -622,12 +752,20 @@ Three edit kinds, all dev-only and written back through the :3131 server.
 **Text editing.** Static JSX text (`<h1>Hello</h1>`) **and** text mixed with
 inline child elements (`<p>Hello <strong>world</strong>!</p>`), where the
 surrounding text runs are editable and the inline elements are locked +
-preserved. Also editable: text on **`motion.*` member tags** (`<motion.h1>…`),
-and text wrapped in a **plain-identifier component** (`<Reveal as="h2">…</Reveal>`,
-`<Link>…`) — the plugin wraps component text children in a stamped `<span>` so
-non-forwarding wrappers still expose a DOM stamp (see component-stamping
-constraint). Repeated components sharing one source line (via `.map`) edit the
-shared source, affecting all instances.
+preserved. **Text interpolated with `{expression}` children** (`<h1>Hello
+{name}!</h1>`) is editable the same way: the plugin wraps each expr child in a
+locked `display:contents` `<span data-nc-expr>` at compile time, so the static
+runs become editable via the mixed-children path while the interpolated value is
+preserved (see the interpolated-text constraint). **HTML entities** in copy
+(`Tom &amp; Jerry`, `we &mdash; you`) edit as their decoded characters — the
+server decodes source entities to match the browser's textContent and re-encodes
+JSX specials on write (see the entity constraint). Also editable: text on
+**`motion.*` member tags** (`<motion.h1>…`), and text wrapped in a
+**plain-identifier component** (`<Reveal as="h2">…</Reveal>`, `<Link>…`) — the
+plugin wraps component text children in a stamped `<span>` so non-forwarding
+wrappers still expose a DOM stamp (see component-stamping constraint). Repeated
+components sharing one source line (via `.map`) edit the shared source, affecting
+all instances.
 
 **Bound-text editing** (the third text flavor — see the dedicated subsection
 below). An element whose *only* child is a bound expression IS editable when it's
@@ -653,24 +791,114 @@ aren't offered. Both look identical in the DOM, so the split stamping is what
 lets the overlay treat them correctly.
 
 **Style editing.** Single-click selects any stamped element and opens the style
-panel (color / background / font-size / font-weight / text-align / padding),
-which rewrites the element's inline `style={{...}}` via `applyStyleEdit` in
-`src/server.ts` (`POST /style`). Inline style only — no Tailwind/className
-rewriting yet (the `applyStyleEdit` locate-then-set/remove contract is the seam a
-Tailwind-class layer would plug into). Only a literal `style={{...}}` object is
-editable; `style={someVar}` is rejected.
+panel (color / background / font-size / font-weight / text-align / padding).
+`applyStyleEdit` in `src/server.ts` (`POST /style`) then takes **one of two
+paths**, chosen by `usesTailwind()` — no user-facing setting:
+
+- **Tailwind project** → a utility class on `className` (`src/tailwind.ts`).
+- **Anything else** → a literal inline `style={{...}}` object, as before. Only a
+  literal object is editable; `style={someVar}` is rejected.
+
+The result carries `mode: 'class' | 'inline'` so the overlay knows what happened.
+See the dedicated Tailwind subsection below for the non-obvious parts.
+
+### Tailwind-class style edits (`src/tailwind.ts`)
+
+Writing an inline `style` object into a utility-class codebase produces a diff
+most teams won't merge, so in a Tailwind project the six panel properties are
+written as classes instead. Things that WILL bite you again:
+
+- **`text-` serves three different properties** — `text-center` (align),
+  `text-lg` (size), `text-red-500` (colour). Setting a colour must strip only the
+  old *colour*. Leaving two competing `text-` classes doesn't "last one wins":
+  their precedence comes from the order in Tailwind's **generated stylesheet**,
+  not the order in `className`, so the edit looks like an intermittent no-op.
+  `classControls()` disambiguates by suffix — align set, then size scale
+  (`xs`…`9xl`), then anything else is a palette entry. For arbitrary values it
+  reads the content (`#`/`rgb(` → colour, `17px` → length) and honours Tailwind's
+  explicit `text-[length:...]` / `text-[color:...]` hints.
+- **A colon does NOT always mean a variant.** The first cut skipped any token
+  containing `:` as a `hover:`-style variant — which silently ignored
+  `text-[length:2rem]` and `text-[color:var(--x)]`. Only a colon **before the
+  `[`** is a variant separator. Caught by a test; keep that test.
+- **Variant-prefixed classes are never removed.** `hover:text-blue-500` applies
+  conditionally; deleting it because someone set a base colour throws away an
+  interaction state the author wrote on purpose.
+- **`bg-` is mostly colour but not always.** `bg-cover`, `bg-no-repeat`,
+  `bg-gradient-to-r`, `bg-clip-text` aren't background-*color*. `NON_COLOR_BG` is
+  matched against **both** the full suffix and its first segment — splitting
+  alone read `bg-no-repeat` as the colour "no". Palette names are open-ended
+  (`bg-brand`), so anything not in that closed set is treated as a colour.
+- **`font-sans` is a family, not a weight** — it must survive a weight change.
+- **Continuous properties get arbitrary values on purpose.** `p-4` is only 16px
+  under the *default* theme; snapping to the scale would silently write a
+  different value than the panel showed in a project with a customised spacing or
+  palette. Enumerated properties (weight, align) do use named utilities. Spaces
+  in arbitrary values become `_` per Tailwind's escape.
+- **A class write also strips that property from any literal inline `style`**
+  (`clearInlineProperty`), because an inline value outranks every class and would
+  leave the new class visibly dead.
+- **The overlay must hand off its preview.** `commitStyle` applies an inline
+  style for instant feedback, but the written class has no CSS until Tailwind
+  rescans and Fast Refresh lands. On `mode === 'class'` the overlay clears that
+  inline value after `CLASS_HANDOFF_MS` (600ms) — otherwise the preview pins the
+  element forever. Don't remove it eagerly on response; the class isn't live yet.
+- **Only a plain-string `className` is rewritten** — `"a b"`, `{'a b'}`, or a
+  substitution-free template. `{cn('a', busy && 'b')}` is refused: appending to
+  one branch of a conditional changes states the user didn't select, and no
+  position is correct for every render. Same posture as `style={someVar}`.
+- **Undo on the class path removes the class**, it does not restore the previous
+  one. The panel records the element's prior *inline* value, which is empty in a
+  Tailwind project. Known and documented, not a bug to "fix" by writing the
+  computed value back as a class.
+- Detection (`usesTailwind`) checks `tailwindcss` in the nearest `package.json`
+  **or** a `tailwind.config.*` beside it — v4 is config-optional and a vendored
+  setup may have no dependency entry, so neither check alone is enough. Memoised
+  per directory; `resetTailwindCache()` exists for tests.
 
 ### Overlay lifecycle (unified Change model)
 
 All three kinds ride one discriminated `Change` union in `src/overlay.ts`
-(`kind: 'text' | 'attr' | 'style'`) and a shared undo/redo stack. Text and attr
-edits share the autosave/manual-staging lifecycle (typed `EditChange`); style
-edits always write immediately (see the TODO below). The `staged` map is
-string-keyed by loc(+attr) so one element can stage its text AND several
-attributes independently — `StagedEdit` carries `kind`, `attr?`, `oldRuns`
-(text runs, or the single attr value in `oldRuns[0]`), and `mixed`. Kind-aware
-helpers (`writeForward`/`writeReverse`, `applyChangeDom`, `keyFor`,
-`stageChange`) branch on `kind`; `applyChange(change, to)` drives undo/redo.
+(`kind: 'text' | 'attr' | 'style'`), a shared undo/redo stack, **and the same
+autosave/manual-staging lifecycle** — autosave writes on commit, manual stages
+behind Save. (`EditChange = TextChange | AttrChange` still exists, but it now
+only marks the two kinds that restore via DOM content/attributes;
+`writeForward`/`writeReverse`/`applyChangeDom` take it. Style restores through
+the inline `style` property, so `applyChange` branches for the DOM step and
+then shares the write/stage decision.)
+
+The `staged` map is string-keyed by loc + **slot**, so one element can stage its
+text, several attributes AND several style properties independently.
+`stageKey(source, slot)` takes the attribute name, `#text`, or
+`#style:<property>` — style slots are **prefixed because a style property and an
+attribute can share a name** (`color` is both), and an unprefixed key would let
+one silently overwrite the other. `StagedEdit` carries `kind`, `attr?`,
+`property?`, `oldRuns` (text runs; or the single attr value / prior **inline**
+style value in `oldRuns[0]`), and `mixed`. `stagedIsDirty` branches on `kind`
+— **not on `s.attr`**, which was only ever a proxy for "is this an attr edit"
+and reads as false for a style entry.
+
+Three non-obvious bits of the style-staging path:
+- **A staged style edit writes the AUTHORED value, never the DOM read-back.**
+  Text and attr staging re-read the element at Save time (`readRuns`,
+  `getAttribute`) because the user typed into the DOM. Style is different: the
+  user picks a value in the panel, and the browser *normalises* whatever you set
+  inline — `#ff00aa` comes back as `rgb(255, 0, 170)`. Reading it back would
+  make Manual mode write a different string than Autosave writes for the very
+  same click, and on the Tailwind path would emit `text-[rgb(255,_0,_170)]`
+  instead of `text-[#ff00aa]`. So `StagedEdit.value` carries the authored value,
+  `stagedIsDirty` compares against it, and `save()` writes it. Re-staging the
+  same slot updates `value` while keeping the original `oldRuns[0]`. Caught by a
+  browser test, not by tsc — both forms are valid strings.
+- **In manual mode the inline preview must survive until Save.** The preview is
+  both what the user sees and what `stagedIsDirty` diffs, so `commitStyle` must
+  **not** call `handOffToClass` when staging — `save()` does the handoff after
+  the write returns `mode: 'class'`. Handing off at stage time would clear the
+  preview *and* make the entry read as clean, silently dropping it from Save.
+- **Undo of an unsaved edit un-stages it** rather than writing a reversal, for
+  all three kinds — the source never saw the edit, so there is nothing to
+  reverse. `applyChange`'s `to === 'before'` branch deletes the staged entry when
+  the change lands back on `oldRuns`.
 **The attribute panel is namespaced `nc-attr-*` / `attrPanel`** to avoid
 colliding with the style panel's `nc-*` / `panel` (both features independently
 added a `.nc-panel` + `const panel`; keep them distinct).
@@ -689,12 +917,18 @@ whole root until reload; also forces Buttons on so the page is interactive).
 ### Mixed-children edits (the segmented protocol)
 
 The plugin stamps any host element with ≥1 non-whitespace `JSXText` direct child
-and no direct `{expression}`/spread child (`has_editable_text` in `lib.rs`) — this
-generalizes the old single-text rule (a strict subset). For a mixed element the
-overlay sends a `segments` array (one `{oldText,newText}` per non-whitespace text
-run, in source/DOM order) instead of the legacy `{oldText,newText}` pair; the
+and no *remaining* direct `{expression}`/spread child (`has_editable_text` in
+`lib.rs`, checked **after** interpolated exprs are preserve-wrapped into spans) —
+this generalizes the old single-text rule (a strict subset). For a mixed element
+the overlay sends a `segments` array (one `{oldText,newText}` per non-whitespace
+text run, in source/DOM order) instead of the legacy `{oldText,newText}` pair; the
 server (`applyEdit` in `server.ts`) positionally zips those runs against the
 element's non-whitespace `JSXText` children and rewrites only the changed ones.
+**Interpolated text rides this exact path**: `Hello {name}!` compiles to text +
+`<span data-nc-expr>{name}</span>` + text, so in the DOM the expr is an inline
+child the overlay locks like any other, and in the source the `{name}` is a
+`JSXExprContainer` the server's `JSXText`-only run filter naturally skips — the
+two static runs align 1:1 with no server change.
 Non-obvious constraints learned building this — **do not re-learn the hard way**:
 
 - **Server must use `getFullText()`/`getFullStart()` for the run nodes**, not
@@ -712,6 +946,16 @@ Non-obvious constraints learned building this — **do not re-learn the hard way
   rejected and the element is reverted from an `innerHTML` snapshot.
 - **`el.normalize()` before reading runs** so browser-split text nodes collapse to
   one node per run, keeping the run count stable/aligned with the source.
+- **Entity reconciliation happens in `norm()`** (`src/entities.ts`). The browser
+  sends decoded textContent (`Tom & Jerry`); the source holds the encoded form
+  (`Tom &amp; Jerry`). BOTH the single-text and segment paths run
+  `decodeEntities` inside `norm` so matching lines up, and encode JSX specials
+  (`& < > { }`) on write via `encodeJsxText` so the file stays valid and
+  round-trips (`decode(encode(x)) === x`). The decoder is a common-named table
+  plus generic numeric (`&#8212;`/`&#x2014;`); unknown entities pass through
+  verbatim. Without this, ANY copy with an entity looked editable but every
+  commit bounced — the exact dishonest affordance we must not ship. Covered by
+  the entity + mixed-entity tests in `server.test.js`; keep them.
 
 Legacy single-text payloads still work unchanged (overlay sends `oldText/newText`
 when the element has no child elements; server falls through to the old path).
@@ -812,25 +1056,60 @@ positional index would rewrite the wrong entry. Consequences:
   object is a single target but still value-guarded against a stale edit.
 Undo/redo works because each direction re-values-matches the current source.
 
-### TODO — wire style edits into Manual-mode staging
+### Testing
 
-Style edits currently **always autosave** (write to source on every control
-change), regardless of the Autosave/Manual toolbar mode — they do ride the shared
-undo/redo stack, but they bypass the `staged` map that Manual mode uses to batch
-text and attribute edits behind the Save button. So in Manual mode, text/attr
-changes stage while style changes still write immediately, which is inconsistent.
+`npm test` inside `nextcanvas/` builds then runs `node --test` (no path arg —
+auto-discovery, which works on Node 20 where a `test/**` glob does **not**; do
+not re-add the glob). CI (`.github/workflows/ci.yml`) runs it on push/PR across
+**ubuntu + macOS + windows** and Node 20/22 — the OS matrix is deliberate
+(path containment, ts-morph write-back, and the Windows drive-letter `data-loc`
+split are OS-sensitive). The publish workflow's build job also runs `npm test`,
+so a release can't publish red.
 
-To fix: extend the Manual-mode staging path (`staged` in `src/overlay.ts`, plus
-`save()`) to also hold pending style changes so a `<h1>` re-color waits for Save
-just like a text edit. Sketch:
-- Add a `'style'` variant to `StagedEdit` (per element+property) — the `staged`
-  map is already string-keyed via `stageKey`, so extend `stageKey`/`keyFor` to
-  key style edits by `property` the way attr edits key by `attr`, and carry the
-  before/after style value.
-- `commitStyle` should branch on `mode` like `commit` does: autosave → write
-  now; manual → stage + toast "Staged", and count toward `stagedDirtyCount()` /
-  the Save badge (`stagedIsDirty` would need a style branch).
-- `save()` must flush staged style changes through `writeStyle` (currently it
-  only iterates text/attr edits), and `setMode('autosave')` must flush them too.
-- `applyChange`'s style branch (undo/redo) already writes immediately; once
-  staged, undo of an unsaved style change should just un-stage instead.
+The suite (`test/*.test.js`), all against temp dirs:
+- **`server.test.js`** — `applyEdit` (single + mixed segments), entities,
+  the corruption guard (`parsesClean`), the scope-one quote fix, and long-tail
+  formatting/nesting fidelity.
+- **`bound-text.test.js`** — `applyBoundTextEdit` resolution/value-matching.
+- **`tailwind-style.test.js`** — `applyStyleEdit` + the class mapping.
+- **`security.test.js`** — origin/host/path gates + the HTTP handler end-to-end.
+- **`entities` cases** live in `server.test.js`; the encoder/decoder is
+  `src/entities.ts`.
+- **`concurrency.test.js`** — overlapping edits through the real `handler` must
+  not lose writes (pins the `serializeWrite` guarantee).
+- **`overlay.test.js`** — the overlay (browser code) IS tested now: jsdom loads
+  the real compiled `dist/overlay.js`, polyfills `contentEditable`/
+  `isContentEditable` (jsdom ships neither) and mocks `fetch`/`localStorage`,
+  then asserts init warnings, edit-mode gating, and the single/mixed/bound commit
+  payloads + undo. jsdom has no layout, so geometry is untested there — that's
+  what the Playwright round-trip is for. `jsdom` is a devDependency of the
+  package (only pulled for tests, never shipped — it's not in `files`).
+
+**Assertions on user-facing copy are load-bearing here** — the error strings
+deliberately distinguish "never editable" from "stale" (see the `/resolve`
+section). When you reword a message, update the matching regex rather than
+loosening it, or the distinction stops being tested.
+
+Two fixtures that make browser testing cheap — both avoid touching a tracked
+file, which matters because `demo/package.json` + its lockfile drive the Vercel
+deploy (see the dep-swap hazard above):
+
+- **To exercise LOCAL package changes in the demo, swap the *symlink*, not the
+  dependency.** Back up `demo/node_modules/@rishi-thak/nextcanvas` and replace
+  it with a symlink to `../../../nextcanvas`; restore it afterwards.
+  `package.json` and `package-lock.json` stay untouched, so there is nothing to
+  forget to revert. (`turbopack.root` is pinned to the repo root, which is
+  exactly what keeps a symlink target outside `demo/` resolvable.) Rebuild
+  `nextcanvas/dist` and restart `next dev` first — the overlay is fetched from
+  the :3131 server at page load, and `usesTailwind()` is memoised per directory
+  for the life of the server process.
+- **To test the Tailwind class path, drop a temporary `demo/tailwind.config.js`.**
+  `usesTailwind()` accepts a config file *alone* (v4 is config-optional), so one
+  untracked file flips the whole demo onto the class path with no dependency
+  change. The demo has no real Tailwind build, so the written classes render no
+  CSS — irrelevant, because the assertions belong on the **source file** and on
+  the overlay's preview handoff, not on rendered pixels.
+
+When asserting on toasts, record them with a `MutationObserver` on
+`.nextcanvas-toast` at init — they self-remove after 2s (4s for errors), so
+polling for one after waiting on a file write reliably misses it.

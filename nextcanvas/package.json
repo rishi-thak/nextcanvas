@@ -1,6 +1,6 @@
 {
   "name": "@rishi-thak/nextcanvas",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "publishConfig": {
     "access": "public"
   },
@@ -57,7 +57,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test \"test/**/*.test.js\"",
+    "test": "npm run build && node --test",
     "build:wasm": "cargo build --release --manifest-path swc-plugin/Cargo.toml --target wasm32-wasip1 && node scripts/copy-wasm.mjs",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepare": "npm run build",
@@ -73,6 +73,7 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.0",
+    "jsdom": "^25.0.1",
     "typescript": "^5.6.0"
   }
 }

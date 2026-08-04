@@ -4,8 +4,9 @@
 # Notes specific to this repo:
 # - The package lives in nextcanvas/, not the repo root, so every step runs there
 #   (defaults.run.working-directory).
-# - There is no test suite, so the "build" job just runs `npm ci`, which triggers the
-#   package's `prepare` script (tsc build of dist/). That verifies the package compiles.
+# - The "build" job runs `npm ci` (triggers the package's `prepare` → tsc build of
+#   dist/) AND `npm test`, so a release cannot publish if the suite is red. The
+#   full cross-platform matrix runs in ci.yml on push/PR; this is the release gate.
 # - The prebuilt SWC wasm (swc/nextcanvas_swc.wasm) is checked in, so CI needs no Rust.
 # - `access: public` comes from package.json publishConfig, so `npm publish` needs no flag.
 
@@ -28,6 +29,7 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+      - run: npm test
 
   publish-npm:
     needs: build

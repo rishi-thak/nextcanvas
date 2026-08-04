@@ -94,6 +94,46 @@ export default function TextPage() {
         props.
       </p>
 
+      <h3>Text interpolated with an expression</h3>
+      <p>
+        Copy that surrounds an interpolated value is editable — you change the
+        static words while the <code>{'{expression}'}</code> is locked and
+        preserved:
+      </p>
+      <pre>
+        <code>{`<h1>Hello {name}!</h1>
+<p>You have {count} messages today</p>`}</code>
+      </pre>
+      <ul>
+        <li>
+          Edit &quot;Hello&quot; / &quot;!&quot; or &quot;You have&quot; /
+          &quot;messages today&quot; — the run you type in is rewritten in place.
+        </li>
+        <li>
+          The interpolated value (<code>{'{name}'}</code>,{' '}
+          <code>{'{count}'}</code>) is not editable here — it comes from a
+          variable, not static copy — so it stays exactly as written. To edit a
+          value that <em>is</em> data, see <a href="/docs/bound-text">Bound
+          text</a>.
+        </li>
+        <li>
+          If an element is <em>only</em> an expression with no static words
+          around it (<code>{'<p>{name}</p>'}</code>), it won&apos;t outline for
+          text editing — there is nothing static to change.
+        </li>
+      </ul>
+
+      <h3>Special characters &amp; entities</h3>
+      <p>
+        Copy containing HTML entities — <code>&amp;amp;</code>,{' '}
+        <code>&amp;mdash;</code>, <code>&amp;rsquo;</code>,{' '}
+        <code>&amp;hellip;</code> — edits normally. You type and see the real
+        character (<code>&amp;</code>, <code>—</code>, <code>&rsquo;</code>);
+        nextcanvas re-encodes anything that needs escaping (<code>&amp;</code>,{' '}
+        <code>&lt;</code>, <code>&gt;</code>, <code>{'{'}</code>,{' '}
+        <code>{'}'}</code>) so the JSX in your file stays valid.
+      </p>
+
       <h3>Motion / animated tags</h3>
       <p>
         Elements like <code>{'<motion.h1>'}</code>, <code>{'<motion.p>'}</code>,
@@ -113,8 +153,14 @@ export default function TextPage() {
       <h2>What won&apos;t open an editor</h2>
       <ul>
         <li>
-          Text mixed with an expression in the same parent:{" "}
-          <code>{`© 2026 {SITE.name}`}</code>
+          An element that is <strong>only</strong> an expression, with no static
+          words to edit: <code>{'<p>{SITE.name}</p>'}</code> (but see{' '}
+          <a href="/docs/bound-text">Bound text</a> — many of these are editable
+          as data).
+        </li>
+        <li>
+          The interpolated value itself inside mixed copy — you edit the words
+          around <code>{'{count}'}</code>, not the number it resolves to.
         </li>
         <li>
           Purely dynamic runtime strings (countdown digits, form errors, chat

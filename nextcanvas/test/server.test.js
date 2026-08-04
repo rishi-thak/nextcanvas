@@ -15,13 +15,22 @@
  * (`node --test`) and `node:assert`.
  */
 
+// Path containment: edits must stay inside the project root (src/security.ts).
+// These tests write throwaway files under the OS temp dir, so point the root
+// there — the env var is read per call, so setting it here covers every case.
+process.env.NEXTCANVAS_ROOT = require('os').tmpdir();
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { applyEdit } = require('../dist/server.js');
+const {
+  applyEdit,
+  applyAttrEdit,
+  parsesClean,
+} = require('../dist/server.js');
 
 /**
  * Write `src` to a throwaway .tsx file, run `applyEdit` against it, and return
@@ -32,7 +41,10 @@ function edit(src, params) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nextcanvas-test-'));
   const fileName = path.join(dir, 'component.tsx');
   fs.writeFileSync(fileName, src);
-  const result = applyEdit({ fileName, ...params });
+  // Default to applyEdit; a case can pass `fn` (e.g. applyAttrEdit) to exercise
+  // another write path through the same fixture machinery.
+  const { fn = applyEdit, ...rest } = params;
+  const result = fn({ fileName, ...rest });
   const after = fs.readFileSync(fileName, 'utf8');
   return { result, after };
 }
@@ -165,22 +177,211 @@ test('rejects a bound value / text that is not present as literal source', () =>
   assert.equal(after, 'const x = <h1>{title}</h1>;\n');
 });
 
-test('does not decode JSX entities, so &amp; text is treated as not found (known limitation)', () => {
-  // Documents current behavior: matching is on raw source text, not the decoded
-  // DOM textContent, so "Tom & Jerry" won't match source "Tom &amp; Jerry".
+test('matches entity-encoded source against the decoded text the browser sends', () => {
+  // The browser sends decoded textContent ("Tom & Jerry"); the source holds the
+  // encoded form (`Tom &amp; Jerry`). Matching decodes the source so the two
+  // line up, and the new value is re-encoded so the JSX stays valid.
   const { result, after } = edit('const x = <p>Tom &amp; Jerry</p>;\n', {
     lineNumber: 1,
     oldText: 'Tom & Jerry',
     newText: 'A & B',
   });
 
+  assert.equal(result.ok, true, result.error);
+  assert.equal(after, 'const x = <p>A &amp; B</p>;\n');
+});
+
+test('decodes named and numeric entities when matching, encodes specials on write', () => {
+  const { result, after } = edit('const x = <h2>we &mdash; you &#8230;</h2>;\n', {
+    lineNumber: 1,
+    // — is the em dash the browser renders for &mdash;, … for &#8230;.
+    oldText: 'we — you …',
+    newText: 'a < b & c > {d}',
+  });
+
+  assert.equal(result.ok, true, result.error);
+  // Angle brackets, ampersand, and braces are all escaped so the JSX is valid.
+  assert.equal(after, 'const x = <h2>a &lt; b &amp; c &gt; &#123;d&#125;</h2>;\n');
+});
+
+test('an entity edit round-trips (decode(encode(x)) === x)', () => {
+  const first = edit('const x = <p>plain</p>;\n', {
+    lineNumber: 1,
+    oldText: 'plain',
+    newText: 'Q & A',
+  });
+  assert.equal(first.after, 'const x = <p>Q &amp; A</p>;\n');
+  // A second edit sees the decoded "Q & A" the browser would show.
+  const second = edit(first.after, {
+    lineNumber: 1,
+    oldText: 'Q & A',
+    newText: 'Q & A!',
+  });
+  assert.equal(second.result.ok, true, second.result.error);
+  assert.equal(second.after, 'const x = <p>Q &amp; A!</p>;\n');
+});
+
+// --- Mixed children: the segmented protocol ----------------------------------
+
+test('mixed children: rewrites text runs and preserves inline elements', () => {
+  const { result, after } = edit(
+    'const x = <p>Hello <strong>world</strong>!</p>;\n',
+    {
+      lineNumber: 1,
+      segments: [
+        { oldText: 'Hello ', newText: 'Howdy ' },
+        { oldText: '!', newText: '?' },
+      ],
+    }
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(after, 'const x = <p>Howdy <strong>world</strong>?</p>;\n');
+});
+
+test('mixed children: only the changed run is touched', () => {
+  const { result, after } = edit(
+    'const x = <p>Keep <em>this</em> change me</p>;\n',
+    {
+      lineNumber: 1,
+      segments: [
+        { oldText: 'Keep ', newText: 'Keep ' },
+        { oldText: ' change me', newText: ' changed' },
+      ],
+    }
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(after, 'const x = <p>Keep <em>this</em> changed</p>;\n');
+});
+
+test('mixed children: a run-count mismatch is refused, source untouched', () => {
+  const src = 'const x = <p>Hi <b>x</b> there</p>;\n';
+  const { result, after } = edit(src, {
+    lineNumber: 1,
+    segments: [{ oldText: 'Hi ', newText: 'Yo ' }],
+  });
   assert.equal(result.ok, false);
-  assert.match(result.error, /Could not find static text/);
-  assert.equal(after, 'const x = <p>Tom &amp; Jerry</p>;\n');
+  assert.match(result.error, /Text structure changed/);
+  assert.equal(after, src);
+});
+
+test('mixed children: entity-encoded runs match and re-encode on write', () => {
+  const { result, after } = edit(
+    'const x = <p>Tom &amp; <b>Jerry</b> &mdash; pals</p>;\n',
+    {
+      lineNumber: 1,
+      segments: [
+        { oldText: 'Tom & ', newText: 'A & ' },
+        { oldText: ' — pals', newText: ' — friends & co' },
+      ],
+    }
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(
+    after,
+    'const x = <p>A &amp; <b>Jerry</b> — friends &amp; co</p>;\n'
+  );
 });
 
 test('rejects an edit with no fileName', () => {
   const result = applyEdit({ oldText: 'a', newText: 'b' });
   assert.equal(result.ok, false);
   assert.equal(result.error, 'missing fileName');
+});
+
+// --- Corruption guard --------------------------------------------------------
+
+test('parsesClean distinguishes valid from broken TSX', () => {
+  assert.equal(parsesClean('/x.tsx', 'const x = <h1>ok</h1>;\n'), true);
+  assert.equal(parsesClean('/x.tsx', 'const a = { b: <p>x { }</p> };\n'), true);
+  assert.equal(parsesClean('/x.tsx', 'const x = <h1>oops'), false);
+  assert.equal(parsesClean('/x.tsx', 'const x = <h1>a</h2>;'), false);
+  assert.equal(parsesClean('/x.tsx', 'function (\n'), false);
+});
+
+test('a value with a double quote inlines as valid, re-parseable JSX (scope: one)', () => {
+  // Regression: JSON.stringify would write href="a\"b" (invalid JSX). We now
+  // encode as an entity so the result parses and round-trips.
+  const src = "const G = 'x';\nconst L = () => <a href={G}>go</a>;\n";
+  const { result, after } = edit(src, {
+    lineNumber: 2,
+    attrName: 'href',
+    oldText: 'x',
+    newText: 'a"b',
+    bound: true,
+    scope: 'one',
+    fn: applyAttrEdit,
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after, /href="a&quot;b"/);
+  assert.equal(parsesClean('/x.tsx', after), true, 'output must be valid JSX');
+});
+
+// --- Long-tail formatting / nesting ------------------------------------------
+
+test('deeply nested JSX: edits the target leaf, leaves the tree intact', () => {
+  const src = [
+    'export const V = () => (',
+    '  <section>',
+    '    <div>',
+    '      <ul>',
+    '        <li><span>Deep leaf</span></li>',
+    '      </ul>',
+    '    </div>',
+    '  </section>',
+    ');',
+    '',
+  ].join('\n');
+  const { result, after } = edit(src, {
+    lineNumber: 5,
+    oldText: 'Deep leaf',
+    newText: 'Deeper leaf',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after, /<li><span>Deeper leaf<\/span><\/li>/);
+  assert.equal(parsesClean('/x.tsx', after), true);
+  // Structure around the leaf is byte-preserved.
+  assert.match(after, /<section>\n {4}<div>\n {6}<ul>/);
+});
+
+test('unusual indentation and a wrapped multi-line run are preserved', () => {
+  const src = [
+    'const X = (',
+    '\t\t<p>',
+    '\t\t\tThe quick brown',
+    '\t\t\tfox jumps',
+    '\t\t</p>',
+    ');',
+    '',
+  ].join('\n');
+  const { result, after } = edit(src, {
+    lineNumber: 2,
+    oldText: 'The quick brown fox jumps',
+    newText: 'A lazy dog sleeps',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after, /A lazy dog sleeps/);
+  assert.equal(parsesClean('/x.tsx', after), true);
+  // Tabs on the surrounding lines are untouched.
+  assert.match(after, /\n\t\t<p>/);
+  assert.match(after, /\n\t\t<\/p>/);
+});
+
+test('sibling code and comments around the edit are untouched', () => {
+  const src = [
+    'const before = 1; // keep me',
+    'const V = () => <h1>Title</h1>;',
+    '/* trailing block comment */',
+    'const after = 2;',
+    '',
+  ].join('\n');
+  const { result, after } = edit(src, {
+    lineNumber: 2,
+    oldText: 'Title',
+    newText: 'New Title',
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.match(after, /const before = 1; \/\/ keep me/);
+  assert.match(after, /\/\* trailing block comment \*\//);
+  assert.match(after, /const after = 2;/);
+  assert.match(after, /<h1>New Title<\/h1>/);
 });

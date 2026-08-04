@@ -41,6 +41,18 @@ export default function WhatWorksPage() {
             </tr>
             <tr>
               <td>
+                <code>{'<h1>Hello {name}!</h1>'}</code>
+              </td>
+              <td>Edit the words; the {'{expression}'} is locked</td>
+            </tr>
+            <tr>
+              <td>
+                <code>{'<p>Tom &amp; Jerry &mdash; pals</p>'}</code>
+              </td>
+              <td>Entities edit as their real characters</td>
+            </tr>
+            <tr>
+              <td>
                 <code>{'<Reveal as="h2">Title</Reveal>'}</code>
               </td>
               <td>Double-click the title</td>
@@ -149,11 +161,21 @@ export default function WhatWorksPage() {
       <h2>Styles — yes, with limits</h2>
       <ul>
         <li>
-          Literal <code>{'style={{ ... }}'}</code> — color, background, font
-          size/weight, text align, padding
+          Six properties either way — color, background, font size/weight, text
+          align, padding
         </li>
         <li>
-          Not className / Tailwind utilities
+          <strong>Tailwind projects:</strong> written as utility classes on{' '}
+          <code>className</code>, replacing the class that controlled that
+          property
+        </li>
+        <li>
+          <strong>Everywhere else:</strong> written into a literal{' '}
+          <code>{'style={{ ... }}'}</code> object
+        </li>
+        <li>
+          Not a computed <code>className</code> —{' '}
+          <code>{"className={cn(...)}"}</code> is refused
         </li>
         <li>
           Not <code>{'style={variable}'}</code>
@@ -172,9 +194,18 @@ export default function WhatWorksPage() {
           <tbody>
             <tr>
               <td>
-                <code>{`Hi {name}`}</code> mixed in one parent
+                The <code>{'{name}'}</code> value inside <code>{`Hi {name}`}</code>
               </td>
-              <td>Ambiguous which part is source text</td>
+              <td>
+                The words are editable; the interpolated value is locked (it
+                comes from a variable)
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>{'<p>{name}</p>'}</code> — expression only, no words
+              </td>
+              <td>Nothing static to edit (may be editable as bound text)</td>
             </tr>
             <tr>
               <td>
@@ -241,7 +272,10 @@ export default function WhatWorksPage() {
         overlay, no stamps, no write-back server. Your users never see it.
       </p>
 
-      <Pager prev={{ href: '/docs/toolbar', label: 'Controls & modes' }} />
+      <Pager
+        prev={{ href: '/docs/toolbar', label: 'Controls & modes' }}
+        next={{ href: '/docs/alternatives', label: 'Alternatives' }}
+      />
     </article>
   );
 }

@@ -15,6 +15,10 @@
 //!   - one or more non-whitespace `JSXText` direct children (editable text),
 //!     whether plain (`<h1>Hello</h1>`) or mixed with inline child elements
 //!     (`<p>Hello <strong>world</strong>!</p>`), OR
+//!   - static text interpolated with `{expression}` children
+//!     (`<p>Hello {name}!</p>`): each expr is wrapped in a locked
+//!     `display:contents` span so the static runs become editable via the
+//!     mixed-children path while the interpolated value is preserved, OR
 //!   - a single **bound-text** child — see below, OR
 //!   - at least one editable string-literal / bound-identifier attribute.
 //!
@@ -28,8 +32,10 @@
 //!       (2) a parameter of an enclosing **capitalized** function/component
 //!           (`function Row({ q }) { … <span>{q}</span> }`) — the server
 //!           prop-drills to the call site (`q={f.q}` inside `faqs.map`)
-//! Anything more complex — computed `{items[i].x}`, a call `{fn().y}`, or text
-//! mixed with an expression (`Hi {name}`) — stays unstamped.
+//! A bound expr's own value editability is limited to the shapes above:
+//! computed `{items[i].x}` and calls `{fn().y}` are not resolvable, so when they
+//! sit next to static text they are preserved (locked) rather than made editable
+//! — the surrounding copy is still editable.
 //!
 //! Editable attributes are emitted split by kind:
 //!   - `data-nc-attrs` — string-literal attrs (`href="/x"`)
@@ -158,6 +164,11 @@ fn first_ident_param(params: &[Param]) -> Option<String> {
 /// child (text the write-back server can rewrite) and **no** direct
 /// `{expression}` / spread child. Plain static text and text mixed with inline
 /// child elements both qualify; a direct bound value disqualifies the element.
+///
+/// NOTE: this is checked *after* the expr-wrapping pass in `visit_mut_jsx_element`
+/// has replaced interpolated `{expr}` children with `<span>` wrappers, so an
+/// element that started as `Hello {name}!` reaches here as text + element + text
+/// and qualifies. See `has_nonws_text` for the pre-wrap check.
 fn has_editable_text(children: &[JSXElementChild]) -> bool {
     let mut has_text = false;
     for child in children {
@@ -174,6 +185,18 @@ fn has_editable_text(children: &[JSXElementChild]) -> bool {
         }
     }
     has_text
+}
+
+/// True when the element has at least one non-whitespace static JSXText child,
+/// **ignoring** any `{expression}` children. Used to decide whether interpolated
+/// text (`Hello {name}!`) is worth making editable: only when there is real
+/// static copy alongside the expression(s) do we wrap the exprs so the copy
+/// becomes editable via the mixed-children path.
+fn has_nonws_text(children: &[JSXElementChild]) -> bool {
+    children.iter().any(|c| match c {
+        JSXElementChild::JSXText(t) => !t.value.trim().is_empty(),
+        _ => false,
+    })
 }
 
 /// A member-access chain of plain identifiers (and optional chaining), rendered
@@ -459,6 +482,19 @@ fn style_display_contents_attr() -> JSXAttrOrSpread {
     })
 }
 
+/// Wrap an interpolated `{expr}` child in a locked, layout-neutral span so the
+/// static text around it becomes editable via the mixed-children path. The span
+/// carries `data-nc-expr` (a marker; the overlay locks it like any inline child)
+/// and `display: contents` so it adds no box. It deliberately has **no**
+/// `data-loc`: the expression itself is not editable, only preserved, and the
+/// server ignores non-JSXText children when zipping text runs.
+fn preserve_wrap_attrs() -> Vec<JSXAttrOrSpread> {
+    vec![
+        data_attr("data-nc-expr", "1".into()),
+        style_display_contents_attr(),
+    ]
+}
+
 /// Wrap `children` in `<span …attrs>…</span>` so a non-forwarding component still
 /// exposes a stamped host node in the DOM. `data-loc` points at the *component's*
 /// source location so write-back finds the original JSX in the source file.
@@ -583,9 +619,17 @@ impl VisitMut for DataLocStamper {
             return;
         }
 
-        // Wrap dangling bound exprs that share the parent with siblings
-        // (`<>…{msg.text}</>` next to other children) so each gets a host span.
-        // Skip when the element is already a sole-bound-text candidate.
+        // Wrap `{expr}` children so text alongside them becomes editable. Two
+        // cases, in one pass:
+        //   - a **bound** expr (`{msg.text}`, `{s.name ?? s.role}`, a string
+        //     ternary) → a stamped `data-nc-text-bound` span, so the value
+        //     itself is editable (dangling among siblings, e.g. `<>…{msg.text}</>`);
+        //   - any **other** expr (`{name}`, `{count}`, `{a && <b/>}`), *only when
+        //     the element also has real static text* → a locked `data-nc-expr`
+        //     span, so the interpolated value is preserved while the surrounding
+        //     copy (`Hello …!`) becomes editable via the mixed-children path.
+        // Skip entirely when the element is a sole-bound-text candidate
+        // (`<p>{x}</p>`) — that is stamped directly below, not wrapped.
         if editable_bound_text_expr(
             &node.children,
             &self.map_params,
@@ -595,10 +639,12 @@ impl VisitMut for DataLocStamper {
         {
             let loc = self.source_map.lookup_char_pos(node.opening.span.lo);
             let loc_value = format!("{}:{}:{}", self.filename, loc.line, loc.col.0 + 1);
+            // Real static copy present? Then locking the exprs unlocks that copy.
+            let has_static = has_nonws_text(&node.children);
             let mut out: Vec<JSXElementChild> = Vec::with_capacity(node.children.len());
             let mut wrapped = false;
             for child in std::mem::take(&mut node.children) {
-                let path = match &child {
+                let bound_path = match &child {
                     JSXElementChild::JSXExprContainer(c) => match &c.expr {
                         JSXExpr::Expr(e)
                             if !is_inert_jsx_guard(e)
@@ -615,12 +661,22 @@ impl VisitMut for DataLocStamper {
                     },
                     _ => None,
                 };
-                if let Some(path) = path {
+                if let Some(path) = bound_path {
                     let attrs = vec![
                         data_attr("data-loc", loc_value.clone()),
                         data_attr("data-nc-text-bound", path),
                     ];
                     out.push(wrap_children_in_span(vec![child], attrs));
+                    wrapped = true;
+                } else if has_static
+                    && matches!(
+                        &child,
+                        JSXElementChild::JSXExprContainer(c)
+                            if matches!(&c.expr, JSXExpr::Expr(_))
+                    )
+                {
+                    // Non-bound interpolated value next to editable copy: lock it.
+                    out.push(wrap_children_in_span(vec![child], preserve_wrap_attrs()));
                     wrapped = true;
                 } else {
                     out.push(child);

@@ -89,14 +89,18 @@ changed on disk.
 | Kind | Example | Notes |
 |---|---|---|
 | Static text | \`<h1>Hello</h1>\` | Also text mixed with inline tags: \`<p>Hi <strong>there</strong></p>\` |
+| Interpolated text | \`<h1>Hello {name}!</h1>\` | Edit the static words; the \`{expression}\` is locked and preserved |
+| Entities | \`Tom &amp; Jerry &mdash; pals\` | Editable as the real characters; re-encoded on write |
 | Component text | \`<Reveal as="h2">Title</Reveal>\`, \`<motion.h1>\` | Plain-identifier components and one-level member tags |
 | Bound text | \`<h3>{speaker.name}</h3>\` | Member chains, \`{a ?? b}\`, string-literal ternaries, \`.map\` params, component props |
 | Attributes | \`href\`, \`src\`, \`alt\`, \`title\`, \`placeholder\`, \`aria-label\` | Literal values, and bound identifiers like \`href={GITHUB}\` |
-| Inline styles | \`style={{ color: 'red' }}\` | Colour, size, weight, alignment, padding |
+| Styles | \`className="text-lg"\` or \`style={{ color: 'red' }}\` | Colour, background, size, weight, alignment, padding. Tailwind projects get utility classes; everything else gets an inline style object |
 
-Not editable: computed access (\`{items[i].x}\`), call results (\`{fn().y}\`), text
-mixed with an expression (\`Hi {name}\`), namespaced tags, and \`className\` /
-Tailwind classes.
+Not editable: an expression-only element with no static words (\`<p>{name}</p>\` —
+though many of these are editable as bound text), the interpolated value itself
+inside mixed copy (you edit the words, not \`{count}\`), computed access
+(\`{items[i].x}\`), call results (\`{fn().y}\`), namespaced tags, a computed
+\`className\` (\`{cn('a', busy && 'b')}\`), and \`style={someVar}\`.
 
 ## How it works
 
@@ -111,6 +115,15 @@ Fast Refresh does the rest — there is no socket to maintain.
   \`NEXTCANVAS_PORT\`; that single variable also reaches the browser.
 - The tool is a **complete no-op** when \`NODE_ENV\` is not \`development\`. Nothing
   is stamped and no overlay script is served in a production build.
+- **The write-back server is locked to the developer's own machine.** It binds
+  loopback only, refuses any request whose \`Origin\`/\`Host\` is not local (so a
+  random website open in the same browser cannot drive it), and refuses to write
+  any file outside the project root — no \`..\` escapes, no \`node_modules\`, no
+  \`.d.ts\`, source files only. If you develop through a forwarded domain
+  (Codespaces, a custom dev host), list its origin in
+  \`NEXTCANVAS_ALLOWED_ORIGINS\` (comma-separated). \`NEXTCANVAS_HOST\` opens the
+  bind address for phone-on-LAN testing; \`NEXTCANVAS_ROOT\` overrides the
+  containment root (defaults to the enclosing git repo).
 - The toolbar has a **Buttons** toggle. Off (the default) makes the page inert so
   single-click selects an element for styling instead of triggering links and
   handlers. Turn it on to use the app normally.

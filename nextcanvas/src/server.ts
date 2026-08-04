@@ -17,9 +17,32 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { isMappable, rewriteClassList, usesTailwind } from './tailwind';
+import { checkRequestSource, validateEditPath } from './security';
+import { decodeEntities, encodeJsxText, encodeJsxAttrValue } from './entities';
 
 export const PORT = Number(process.env.NEXTCANVAS_PORT || 3131);
+/**
+ * Interface to bind. Loopback by default so the file-writing server is not
+ * reachable from the LAN at all; set NEXTCANVAS_HOST (e.g. `0.0.0.0`) to open
+ * it up for phone-on-LAN testing — the origin/host checks still apply.
+ */
+export const HOST = process.env.NEXTCANVAS_HOST || '127.0.0.1';
 const OVERLAY_PATH = path.join(__dirname, 'overlay.js');
+
+/**
+ * Attributes the server will rewrite — the same six the SWC plugin stamps as
+ * editable (EDITABLE_ATTRS in swc-plugin/src/lib.rs; keep in sync). Enforced
+ * server-side too so a forged request can't rewrite arbitrary attributes.
+ */
+const EDITABLE_ATTR_NAMES = new Set([
+  'src',
+  'href',
+  'alt',
+  'title',
+  'placeholder',
+  'aria-label',
+]);
 
 interface Segment {
   oldText: string;
@@ -78,17 +101,73 @@ interface EditResult {
   newText?: string;
   property?: string;
   value?: string | null;
+  /**
+   * How a style edit was written. `class` means a Tailwind utility landed in
+   * `className`, so the overlay must drop the inline preview it applied or the
+   * inline value would permanently outrank the class.
+   */
+  mode?: 'class' | 'inline';
 }
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+/**
+ * Send a JSON response. CORS reflects the (already-validated) request origin —
+ * never `*` — so a disallowed page can't read responses even if one slipped
+ * past the request gate.
+ */
+function send(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  origin?: string
+): void {
   const json = JSON.stringify(body);
-  res.writeHead(status, {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  });
+    Vary: 'Origin',
+  };
+  if (origin) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS';
+    headers['Access-Control-Allow-Headers'] = 'Content-Type';
+  }
+  res.writeHead(status, headers);
   res.end(json);
+}
+
+/**
+ * Corruption guard: refuse to write when an edit would make the file
+ * unparseable, leaving the original on disk untouched.
+ *
+ * The tool rewrites the developer's real source, so a bad edit is a corrupted
+ * file — the one failure mode with lasting blast radius. Before every save we
+ * re-parse the edited in-memory buffer with the TS scanner (syntactic only, so
+ * it's cheap and ignores type errors) and abort if it has parse errors. ts-morph
+ * mutations are structural and rarely produce invalid syntax, but this closes
+ * the gap for the raw-text paths (`replaceText` of user copy) and any future
+ * write path. Returns false WITHOUT saving on invalid; true after saving.
+ */
+export const CORRUPT_MSG =
+  'Refusing to write — the edit would make the file unparseable, so your source was left unchanged. This is a bug; please report it.';
+
+/** True when `text` parses as TSX with no syntax errors. Exported for tests. */
+export function parsesClean(filePath: string, text: string): boolean {
+  const { ts } = require('ts-morph') as typeof import('ts-morph');
+  const parsed = ts.createSourceFile(
+    filePath,
+    text,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ false,
+    ts.ScriptKind.TSX
+  );
+  const diags = (parsed as unknown as { parseDiagnostics?: unknown[] })
+    .parseDiagnostics;
+  return !(diags && diags.length > 0);
+}
+
+function trySave(sf: import('ts-morph').SourceFile): boolean {
+  if (!parsesClean(sf.getFilePath(), sf.getFullText())) return false;
+  sf.saveSync();
+  return true;
 }
 
 /** Apply a single static-text edit to a source file. */
@@ -98,8 +177,10 @@ export function applyEdit(edit: Edit): EditResult {
   const { Project, SyntaxKind } =
     require('ts-morph') as typeof import('ts-morph');
 
-  const { fileName, lineNumber, columnNumber, oldText, newText } = edit;
-  if (!fileName) return { ok: false, error: 'missing fileName' };
+  const { lineNumber, columnNumber, oldText, newText } = edit;
+  const checked = validateEditPath(edit.fileName);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  const fileName = checked.path!;
 
   const project = new Project({
     compilerOptions: { allowJs: true, jsx: 4 /* preserve */ },
@@ -108,11 +189,12 @@ export function applyEdit(edit: Edit): EditResult {
 
   const sourceFile = project.addSourceFileAtPath(fileName);
 
-  // Compare with internal whitespace collapsed: the browser hands us the
-  // rendered textContent (runs of whitespace → a single space), while the JSX
-  // source text node may be wrapped across several indented lines. Trimming
-  // alone isn't enough — we must normalize interior whitespace on both sides.
-  const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
+  // Compare with internal whitespace collapsed AND entities decoded: the browser
+  // hands us the rendered textContent (runs of whitespace → a single space,
+  // `&amp;` → "&"), while the JSX source text node may be wrapped across several
+  // indented lines and holds the encoded form. Normalise both to compare, and
+  // encode the user's new value on the way back so the JSX stays valid.
+  const norm = (s: string) => decodeEntities(s).trim().replace(/\s+/g, ' ');
 
   // Re-insert a JSXText node's original leading/trailing whitespace around new
   // core text, so indentation/wrapping is preserved on write-back.
@@ -125,6 +207,17 @@ export function applyEdit(edit: Edit): EditResult {
   // Mixed-children edit: rewrite the element's text runs, preserving its inline
   // child elements. Located by the data-loc line (the opening tag's line).
   if (edit.segments && edit.segments.length) {
+    if (
+      !Array.isArray(edit.segments) ||
+      edit.segments.some(
+        (s) =>
+          s == null ||
+          typeof s.oldText !== 'string' ||
+          typeof s.newText !== 'string'
+      )
+    ) {
+      return { ok: false, error: 'malformed segments' };
+    }
     const els = sourceFile
       .getDescendantsOfKind(SyntaxKind.JsxElement)
       .filter(
@@ -184,7 +277,9 @@ export function applyEdit(edit: Edit): EditResult {
       .map(({ node, seg }) => ({
         start: node.getFullStart(),
         end: node.getEnd(),
-        text: String(seg.newText),
+        // Encode JSX-special chars so a typed "A & B" writes valid `A &amp; B`.
+        // Boundary whitespace the browser sent is untouched by the encoder.
+        text: encodeJsxText(String(seg.newText)),
       }))
       .sort((a, b) => b.start - a.start);
 
@@ -192,7 +287,7 @@ export function applyEdit(edit: Edit): EditResult {
       return { ok: true, fileName, lineNumber, oldText: '', newText: '' };
     }
     for (const p of patches) sourceFile.replaceText([p.start, p.end], p.text);
-    sourceFile.saveSync();
+    if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
     return {
       ok: true,
       fileName,
@@ -203,6 +298,7 @@ export function applyEdit(edit: Edit): EditResult {
   }
 
   if (oldText == null) return { ok: false, error: 'missing oldText' };
+  if (typeof newText !== 'string') return { ok: false, error: 'missing newText' };
   const wanted = norm(String(oldText));
 
   const candidates = sourceFile
@@ -240,8 +336,19 @@ export function applyEdit(edit: Edit): EditResult {
   // Preserve the node's leading/trailing whitespace (its indentation) and
   // replace the whole text core. This works for single-line text and for
   // multi-line wrapped text alike (the latter collapses onto one line).
-  target.replaceWithText(rewrap(target.getText(), String(newText)));
-  sourceFile.saveSync();
+  // Encode JSX-special chars so a typed "A & B" writes valid `A &amp; B`.
+  //
+  // Use a raw `replaceText` splice on the node's FULL span (getFullText/
+  // getFullStart/getEnd — a JSXText node's leading whitespace is part of its
+  // full text, trivia to the trimmed getters), NOT `replaceWithText`: the latter
+  // runs ts-morph's structural manipulation, which reindents the surrounding
+  // lines and can mix spaces into tab-indented JSX. The raw splice touches only
+  // this node's bytes, matching the mixed-children path's fidelity.
+  sourceFile.replaceText(
+    [target.getFullStart(), target.getEnd()],
+    rewrap(target.getFullText(), encodeJsxText(String(newText)))
+  );
+  if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
 
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
 }
@@ -255,15 +362,27 @@ export function applyAttrEdit(edit: Edit): EditResult {
   const { Project, SyntaxKind, Node } =
     require('ts-morph') as typeof import('ts-morph');
 
-  const { fileName, lineNumber, attrName, oldText, newText } = edit;
-  if (!fileName) return { ok: false, error: 'missing fileName' };
+  const { lineNumber, attrName, oldText, newText } = edit;
+  const checked = validateEditPath(edit.fileName);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  const fileName = checked.path!;
   if (!attrName) return { ok: false, error: 'missing attrName' };
+  if (!EDITABLE_ATTR_NAMES.has(attrName)) {
+    return { ok: false, error: `Attribute "${attrName}" is not editable.` };
+  }
+  if (typeof oldText !== 'string' || typeof newText !== 'string') {
+    return { ok: false, error: 'missing oldText/newText' };
+  }
 
   const project = new Project({
     compilerOptions: { allowJs: true, jsx: 4 /* preserve */ },
     skipAddingFilesFromTsConfig: true,
   });
   const sourceFile = project.addSourceFileAtPath(fileName);
+
+  // Rewritten so downstream code (including the bound path) always sees the
+  // validated absolute path.
+  edit = { ...edit, fileName };
 
   if (edit.bound) {
     return applyBoundAttrEdit(edit, sourceFile);
@@ -312,7 +431,7 @@ export function applyAttrEdit(edit: Edit): EditResult {
   }
   // setLiteralValue preserves the original quote character and escapes as needed.
   init.setLiteralValue(String(newText));
-  sourceFile.saveSync();
+  if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
 
   return { ok: true, fileName, lineNumber, oldText: wanted, newText };
 }
@@ -366,10 +485,12 @@ function applyBoundAttrEdit(
   }
 
   if (scope === 'one') {
-    // Inline a literal on just this element. JSON.stringify yields a safely
-    // escaped double-quoted string, turning `href={GITHUB}` into `href="new"`.
-    target.setInitializer(JSON.stringify(String(newText)));
-    sourceFile.saveSync();
+    // Inline a string-literal on just this element, turning `href={GITHUB}` into
+    // `href="new"`. Encode for a double-quoted JSX attribute — `JSON.stringify`
+    // would backslash-escape a `"` (`href="a\"b"`), which is INVALID JSX; the
+    // entity form (`href="a&quot;b"`) parses and round-trips.
+    target.setInitializer(`"${encodeJsxAttrValue(String(newText))}"`);
+    if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
     return { ok: true, fileName, lineNumber, oldText, newText };
   }
 
@@ -394,7 +515,7 @@ function applyBoundAttrEdit(
     };
   }
   declInit.setLiteralValue(String(newText));
-  sourceFile.saveSync();
+  if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
   return { ok: true, fileName, lineNumber, oldText, newText };
 }
 
@@ -465,10 +586,14 @@ function resolveModuleFile(
   project: import('ts-morph').Project
 ): import('ts-morph').SourceFile | undefined {
   const accept = (file: string): import('ts-morph').SourceFile | undefined => {
-    if (file.includes('node_modules') || file.endsWith('.d.ts')) return undefined;
+    // Full path validation, not just node_modules/.d.ts: a resolved import is a
+    // file we may later WRITE (the owning file of a bound value is saveSync'd),
+    // so it must satisfy the same containment as a client-supplied fileName.
+    const checked = validateEditPath(file);
+    if (!checked.ok) return undefined;
     return (
-      project.getSourceFile(file) ??
-      project.addSourceFileAtPathIfExists(file) ??
+      project.getSourceFile(checked.path!) ??
+      project.addSourceFileAtPathIfExists(checked.path!) ??
       undefined
     );
   };
@@ -550,9 +675,14 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
   const { Project, SyntaxKind, Node } =
     require('ts-morph') as typeof import('ts-morph');
 
-  const { fileName, lineNumber, columnNumber, expr, oldText, newText } = edit;
-  if (!fileName) return { ok: false, error: 'missing fileName' };
-  if (!expr) return { ok: false, error: 'missing expr' };
+  const { lineNumber, columnNumber, expr, oldText, newText } = edit;
+  const checkedPath = validateEditPath(edit.fileName);
+  if (!checkedPath.ok) return { ok: false, error: checkedPath.error };
+  const fileName = checkedPath.path!;
+  if (!expr || typeof expr !== 'string') return { ok: false, error: 'missing expr' };
+  if (typeof oldText !== 'string' || typeof newText !== 'string') {
+    return { ok: false, error: 'missing oldText/newText' };
+  }
 
   // `{s.name ?? s.role}` / `{a || b}` / `path??#lit:—` — try each operand.
   let candidates = String(expr)
@@ -633,7 +763,7 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
       const owning = matches[0].getSourceFile();
       if (!edit.dryRun) {
         matches[0].setLiteralValue(String(newText));
-        owning.saveSync();
+        if (!trySave(owning)) return { ok: false, error: CORRUPT_MSG };
       }
       return {
         ok: true,
@@ -1123,7 +1253,7 @@ export function applyBoundTextEdit(edit: Edit): EditResult {
     const owning = leafInit.getSourceFile();
     if (!edit.dryRun) {
       leafInit.setLiteralValue(String(newText));
-      owning.saveSync();
+      if (!trySave(owning)) return { ok: false, error: CORRUPT_MSG };
     }
     return {
       ok: true,
@@ -1152,6 +1282,92 @@ function jsString(value: string): string {
   return "'" + value.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+/**
+ * Write `property` into the element's `className` as a Tailwind utility.
+ *
+ * Only a plain string is rewritten — `className="a b"`, `className={'a b'}` or
+ * an untagged template with no `${}` in it. Anything computed (`className={cn(
+ * 'a', busy && 'b')}`, a template with substitutions, a bare identifier) is
+ * refused rather than guessed at: appending to one branch of a conditional would
+ * change the styling of states the author did not select, and there is no
+ * position that is correct for every render. This mirrors how the inline path
+ * already refuses `style={someVar}`.
+ */
+function applyClassStyle(
+  target: any,
+  property: string,
+  value: string,
+  remove: boolean,
+  Node: any,
+  _SyntaxKind: any
+): EditResult {
+  const attr = target.getAttribute('className');
+
+  if (!attr) {
+    if (remove) return { ok: true };
+    const cls = rewriteClassList('', property, value);
+    if (!cls) return { ok: false, error: `Cannot express ${property} as a Tailwind class.` };
+    target.addAttribute({ name: 'className', initializer: `"${cls}"` });
+    return { ok: true };
+  }
+
+  if (!Node.isJsxAttribute(attr)) {
+    return { ok: false, error: 'className is a spread; cannot edit.' };
+  }
+
+  const init = attr.getInitializer();
+  let literal: any = null;
+
+  if (Node.isStringLiteral(init)) {
+    literal = init;
+  } else if (Node.isJsxExpression(init)) {
+    const inner = init.getExpression();
+    if (Node.isStringLiteral(inner) || Node.isNoSubstitutionTemplateLiteral(inner)) {
+      literal = inner;
+    }
+  }
+
+  if (!literal) {
+    return {
+      ok: false,
+      error:
+        'This element builds className dynamically, so nextcanvas cannot safely add a class. Edit the class list in your source, or give the element a plain className string.',
+    };
+  }
+
+  const next = rewriteClassList(String(literal.getLiteralValue()), property, value);
+
+  if (!next.trim()) {
+    attr.remove();
+    return { ok: true };
+  }
+  literal.setLiteralValue(next);
+  return { ok: true };
+}
+
+/**
+ * Drop `property` from a literal inline `style={{...}}` if one is present.
+ *
+ * Called after a class write: an inline value for the same property wins over
+ * any class, so leaving it behind makes the class edit look broken. Anything
+ * non-literal is left alone — it isn't ours to rewrite.
+ */
+function clearInlineProperty(target: any, property: string, Node: any): void {
+  const styleAttr = target.getAttribute('style');
+  if (!styleAttr || !Node.isJsxAttribute(styleAttr)) return;
+  const init = styleAttr.getInitializer();
+  const expr = Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!expr || !Node.isObjectLiteralExpression(expr)) return;
+  const existing = expr.getProperty(property);
+  if (!existing) return;
+  existing.remove();
+  if (expr.getProperties().length === 0) styleAttr.remove();
+}
+
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 /** camelCase style keys are valid identifiers; quote anything unexpected. */
 function styleKey(property: string): string {
   return /^[A-Za-z_$][\w$]*$/.test(property) ? property : jsString(property);
@@ -1174,9 +1390,16 @@ export function applyStyleEdit(edit: StyleEdit): EditResult {
   const { Project, SyntaxKind, Node } =
     require('ts-morph') as typeof import('ts-morph');
 
-  const { fileName, lineNumber, columnNumber, property } = edit;
-  if (!fileName) return { ok: false, error: 'missing fileName' };
-  if (!property) return { ok: false, error: 'missing style property' };
+  const { lineNumber, columnNumber, property } = edit;
+  const checked = validateEditPath(edit.fileName);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  const fileName = checked.path!;
+  if (!property || typeof property !== 'string') {
+    return { ok: false, error: 'missing style property' };
+  }
+  if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(property)) {
+    return { ok: false, error: `Malformed style property "${property}".` };
+  }
   const value = edit.value == null ? '' : String(edit.value);
   const remove = value.trim() === '';
 
@@ -1213,16 +1436,37 @@ export function applyStyleEdit(edit: StyleEdit): EditResult {
       .sort((a, b) => a.d - b.d)[0].n;
   }
 
+  // In a Tailwind project, write a utility class instead of an inline style —
+  // an inline `style` object in a utility-class codebase is a diff most teams
+  // will not merge. Falls through to the inline path for everyone else.
+  if (isMappable(property) && usesTailwind(fileName)) {
+    const classResult = applyClassStyle(
+      target,
+      property,
+      value,
+      remove,
+      Node,
+      SyntaxKind
+    );
+    if (!classResult.ok) return { ...classResult, fileName, lineNumber, property };
+    // An inline value for the same property would outrank the class we just
+    // wrote, leaving the edit visibly dead. Strip it if it's ours to strip.
+    clearInlineProperty(target, property, Node);
+    if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
+    return { ok: true, fileName, lineNumber, property, value, mode: 'class' };
+  }
+
   const styleAttr = target.getAttribute('style');
 
   if (!styleAttr) {
-    if (remove) return { ok: true, fileName, lineNumber, property, value: '' };
+    if (remove)
+      return { ok: true, fileName, lineNumber, property, value: '', mode: 'inline' };
     target.addAttribute({
       name: 'style',
       initializer: `{{ ${styleKey(property)}: ${jsString(value)} }}`,
     });
-    sourceFile.saveSync();
-    return { ok: true, fileName, lineNumber, property, value };
+    if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
+    return { ok: true, fileName, lineNumber, property, value, mode: 'inline' };
   }
 
   if (!Node.isJsxAttribute(styleAttr)) {
@@ -1242,8 +1486,8 @@ export function applyStyleEdit(edit: StyleEdit): EditResult {
   if (remove) {
     if (existing) existing.remove();
     if (expr.getProperties().length === 0) styleAttr.remove();
-    sourceFile.saveSync();
-    return { ok: true, fileName, lineNumber, property, value: '' };
+    if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
+    return { ok: true, fileName, lineNumber, property, value: '', mode: 'inline' };
   }
 
   if (existing && Node.isPropertyAssignment(existing)) {
@@ -1255,8 +1499,8 @@ export function applyStyleEdit(edit: StyleEdit): EditResult {
       initializer: jsString(value),
     });
   }
-  sourceFile.saveSync();
-  return { ok: true, fileName, lineNumber, property, value };
+  if (!trySave(sourceFile)) return { ok: false, error: CORRUPT_MSG };
+  return { ok: true, fileName, lineNumber, property, value, mode: 'inline' };
 }
 
 interface ResolveItem {
@@ -1309,10 +1553,53 @@ function resolveBatch(items: ResolveItem[]): {
   });
 }
 
-function handler(req: IncomingMessage, res: ServerResponse): void {
-  if (req.method === 'OPTIONS') return send(res, 204, {});
+/**
+ * Serialize all mutating edits through one queue.
+ *
+ * Every `apply*` call is a read-modify-write on a source file (ts-morph reads
+ * the file, edits the AST, `saveSync`s). Today they are fully synchronous, so
+ * Node's event loop already runs them one at a time with no interleaving — two
+ * concurrent requests can't produce a lost update because each re-reads the
+ * current file. This queue makes that guarantee **explicit and durable**: it
+ * survives someone later introducing an `await` into a write path (at which
+ * point sync atomicity would silently break), and it documents the intent. The
+ * overhead is a microtask hop per edit — irrelevant for a human clicking.
+ *
+ * Read-only endpoints (`/resolve`, dry-run) are not queued; they never write.
+ */
+let writeQueue: Promise<void> = Promise.resolve();
+function serializeWrite(task: () => void): void {
+  const run = writeQueue.then(task);
+  // Keep the chain alive whether the task resolved or threw (it shouldn't — the
+  // task has its own try/catch and always responds — but never wedge the queue).
+  writeQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+}
+
+/** Largest accepted request body; beyond this the request is answered 413. */
+const MAX_BODY_BYTES = 1_000_000;
+/** Largest /resolve batch; a bigger one is truncated (and logged). */
+const MAX_RESOLVE_ITEMS = 500;
+
+export function handler(req: IncomingMessage, res: ServerResponse): void {
+  const origin =
+    typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+
+  // Who is asking? A file-writing server on localhost is a drive-by target for
+  // any website open in the same browser, so non-local origins/hosts are turned
+  // away before a single byte of the body is read. See src/security.ts.
+  const source = checkRequestSource(origin, req.headers.host);
+  if (!source.ok) {
+    console.warn(`[nextcanvas] ${source.error}`);
+    // No CORS headers on the refusal: the caller can't read it either.
+    return send(res, 403, { ok: false, error: source.error });
+  }
+
+  if (req.method === 'OPTIONS') return send(res, 204, {}, origin);
   if (req.method === 'GET' && req.url === '/health') {
-    return send(res, 200, { ok: true, service: 'nextcanvas' });
+    return send(res, 200, { ok: true, service: 'nextcanvas' }, origin);
   }
   if (req.method === 'GET' && req.url === '/overlay.js') {
     // Serve the overlay as a raw classic script so no bundler ever touches it.
@@ -1322,11 +1609,13 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
         res.end('// nextcanvas: overlay not found');
         return;
       }
-      res.writeHead(200, {
+      const headers: Record<string, string> = {
         'Content-Type': 'application/javascript; charset=utf-8',
-        'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'no-store',
-      });
+        Vary: 'Origin',
+      };
+      if (origin) headers['Access-Control-Allow-Origin'] = origin;
+      res.writeHead(200, headers);
       res.end(code);
     });
     return;
@@ -1335,25 +1624,41 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
   const isStyle = req.method === 'POST' && req.url === '/style';
   const isResolve = req.method === 'POST' && req.url === '/resolve';
   if (!isText && !isStyle && !isResolve) {
-    return send(res, 404, { ok: false, error: 'not found' });
+    return send(res, 404, { ok: false, error: 'not found' }, origin);
   }
 
   let raw = '';
+  let tooLarge = false;
   req.on('data', (chunk) => {
+    if (tooLarge) return;
     raw += chunk;
-    if (raw.length > 1_000_000) req.destroy(); // basic guard
+    if (raw.length > MAX_BODY_BYTES) {
+      tooLarge = true;
+      raw = '';
+      send(res, 413, { ok: false, error: 'payload too large' }, origin);
+    }
   });
   req.on('end', () => {
+    if (tooLarge) return;
     let payload: Edit & StyleEdit;
     try {
       payload = JSON.parse(raw);
     } catch {
-      return send(res, 400, { ok: false, error: 'invalid JSON' });
+      return send(res, 400, { ok: false, error: 'invalid JSON' }, origin);
+    }
+    if (payload == null || typeof payload !== 'object') {
+      return send(res, 400, { ok: false, error: 'invalid payload' }, origin);
     }
     if (isResolve) {
-      const items = Array.isArray((payload as { items?: ResolveItem[] }).items)
+      let items = Array.isArray((payload as { items?: ResolveItem[] }).items)
         ? (payload as unknown as { items: ResolveItem[] }).items
         : [];
+      if (items.length > MAX_RESOLVE_ITEMS) {
+        console.warn(
+          `[nextcanvas] /resolve batch of ${items.length} truncated to ${MAX_RESOLVE_ITEMS}`
+        );
+        items = items.slice(0, MAX_RESOLVE_ITEMS);
+      }
       try {
         const results = resolveBatch(items);
         const dead = results.filter((r) => !r.ok).length;
@@ -1362,37 +1667,40 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
             `[nextcanvas] ${dead}/${results.length} bound-text location(s) are not writable; the overlay will not offer them`
           );
         }
-        return send(res, 200, { ok: true, results });
+        return send(res, 200, { ok: true, results }, origin);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return send(res, 500, { ok: false, error: message });
+        return send(res, 500, { ok: false, error: message }, origin);
       }
     }
 
-    try {
-      const result = isStyle
-        ? applyStyleEdit(payload)
-        : payload.textBound
-          ? applyBoundTextEdit(payload)
-          : payload.attrName
-            ? applyAttrEdit(payload)
-            : applyEdit(payload);
-      const status = result.ok ? 200 : 422;
-      if (result.ok) {
-        console.log(
-          isStyle
-            ? `[nextcanvas] styled ${result.fileName}: ${result.property} = "${result.value}"`
-            : `[nextcanvas] edited ${result.fileName}: "${result.oldText}" -> "${result.newText}"`
-        );
-      } else {
-        console.warn(`[nextcanvas] rejected edit: ${result.error}`);
+    // Run through the write queue so overlapping edits can never interleave.
+    serializeWrite(() => {
+      try {
+        const result = isStyle
+          ? applyStyleEdit(payload)
+          : payload.textBound
+            ? applyBoundTextEdit(payload)
+            : payload.attrName
+              ? applyAttrEdit(payload)
+              : applyEdit(payload);
+        const status = result.ok ? 200 : 422;
+        if (result.ok) {
+          console.log(
+            isStyle
+              ? `[nextcanvas] styled ${result.fileName}: ${result.property} = "${result.value}"`
+              : `[nextcanvas] edited ${result.fileName}: "${result.oldText}" -> "${result.newText}"`
+          );
+        } else {
+          console.warn(`[nextcanvas] rejected edit: ${result.error}`);
+        }
+        send(res, status, result, origin);
+      } catch (err) {
+        console.error('[nextcanvas] edit failed:', err);
+        const message = err instanceof Error ? err.message : String(err);
+        send(res, 500, { ok: false, error: message }, origin);
       }
-      return send(res, status, result);
-    } catch (err) {
-      console.error('[nextcanvas] edit failed:', err);
-      const message = err instanceof Error ? err.message : String(err);
-      return send(res, 500, { ok: false, error: message });
-    }
+    });
   });
 }
 
@@ -1425,7 +1733,9 @@ export function startServer(): http.Server {
   const tryBind = (): void => {
     if (server.listening || binding) return;
     binding = true;
-    server.listen(PORT);
+    // Loopback-only by default (NEXTCANVAS_HOST overrides) — the LAN never
+    // sees the file-writing server unless the user opts in.
+    server.listen(PORT, HOST);
   };
 
   server.on('listening', () => {

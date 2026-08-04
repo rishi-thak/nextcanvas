@@ -11,6 +11,11 @@
  * a positional index — so a filtered/reordered list edits the right entry.
  */
 
+// Path containment: edits must stay inside the project root (src/security.ts).
+// These tests write throwaway files under the OS temp dir, so point the root
+// there — the env var is read per call, so setting it here covers every case.
+process.env.NEXTCANVAS_ROOT = require('os').tmpdir();
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -108,7 +113,10 @@ test('member-chain: no matching entry is rejected as stale', () => {
     newText: 'X',
   });
   assert.equal(result.ok, false);
-  assert.match(result.error, /No entry|reload/i);
+  // The resolved-array path blames a changed source (or text altered before
+  // display) — deliberately distinct from the unresolved-collection copy, which
+  // says the text comes from data and is never editable.
+  assert.match(result.error, /source may have changed|altered before/i);
   assert.equal(after['c.tsx'], SPEAKERS_SRC);
 });
 
@@ -239,7 +247,10 @@ test('cross-file: resolves a relatively-imported array and edits the DATA file',
   assert.equal(result.ok, true, result.error);
   assert.match(after['data.ts'], /name: 'Linus T\.'/); // data file rewritten
   assert.equal(after['page.tsx'], page); // page untouched
-  assert.equal(result.fileName, paths['data.ts']); // owning file reported
+  // Owning file reported. Compare realpaths: the server resolves symlinks as
+  // part of path containment, and macOS's tmpdir is itself a /var → /private
+  // symlink, so the literal strings can legitimately differ.
+  assert.equal(result.fileName, fs.realpathSync(paths['data.ts']));
 });
 
 test('cross-file: direct object imported from another module', () => {

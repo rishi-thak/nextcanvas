@@ -83,8 +83,8 @@ export default function ToolbarPage() {
       <h2>Autosave vs Manual</h2>
       <ul>
         <li>
-          <strong>Autosave</strong> — text and attribute commits write to source
-          immediately.
+          <strong>Autosave</strong> — text, attribute and style commits write to
+          source immediately.
         </li>
         <li>
           <strong>Manual</strong> — those commits stage locally. The Save button
@@ -93,7 +93,10 @@ export default function ToolbarPage() {
         </li>
       </ul>
       <p>
-        Style panel changes always write immediately today, even in Manual mode.
+        Staging is per element <em>and</em> per slot, so one element can hold a
+        pending text edit, several attributes and several style properties at
+        once. Undoing an edit you haven&apos;t saved drops it from the batch
+        rather than writing a reversal.
       </p>
 
       <h2>Undo / redo</h2>
