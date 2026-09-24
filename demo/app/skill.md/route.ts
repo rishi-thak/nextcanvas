@@ -102,6 +102,12 @@ inside mixed copy (you edit the words, not \`{count}\`), computed access
 (\`{items[i].x}\`), call results (\`{fn().y}\`), namespaced tags, a computed
 \`className\` (\`{cn('a', busy && 'b')}\`), and \`style={someVar}\`.
 
+Native option labels, textarea content, and document title/script/style text
+are left alone; edit them in source. Text directly inside structural containers
+(selects, lists, table rows) is also left alone. Text in list items and table cells
+remains editable. Inline fragments and component children inherit these limits;
+components defined elsewhere that return text cannot be classified by their callers.
+
 ## How it works
 
 A compile-time SWC plugin stamps \`data-loc="<file>:<line>:<col>"\` onto elements

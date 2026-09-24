@@ -432,6 +432,33 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
 
 ## Non-obvious constraints (do not re-learn these the hard way)
 
+- **Never insert text spans in restricted native content.** `TextContext` in the
+  SWC plugin suppresses text wrapping/stamping under native `option`, raw-text /
+  text-only elements, and directly inside structural parents (select/list/table
+  containers, head/html, picture). Text-only ancestry survives all inline JSX
+  descendants; structural restrictions reset at a known native child (e.g. `td`,
+  `li`). Fragments, expressions and custom component children inherit context.
+  JSX attribute values are separate render values and reset context. Attribute
+  stamps remain available. This is syntactic, not interprocedural: a separately
+  defined component returning text cannot infer a native parent at its call site,
+  and polymorphic custom components cannot be assumed to render a native tag.
+  `test/swc-content-model.test.js` runs the **shipped WASM through Next SWC**,
+  compares option SSR before HTML parsing, checks values/selection/escaping, and
+  keeps positive controls for normal text. Rebuild `build:wasm` after Rust edits;
+  `npm test` alone exercises the existing artifact, not the Rust source.
+  Optional browser check: `node scripts/check-content-model-browser.cjs` from
+  `nextcanvas/` (add `--webpack` for webpack). Uses the root Playwright install,
+  builds a temporary app against the local package, checks hydration/selection
+  and a normal overlay edit through source write-back and reload,
+  then removes the app and stops its own server. Verified on macOS with Next
+  16.2.10 / React 19.2.7 / Turbopack. The isolated webpack run currently emits
+  no stamps (the positive control fails); do not count it as validation of the
+  plugin or weaken that assertion. This needs separate webpack investigation.
+  Start the smoke app from the repo-root cwd with its directory as the Next CLI
+  argument: Turbopack stamps are relative to the configured repo root, so the
+  write-back server must resolve paths from that same root.
+
+
 - **Components land text stamps via a synthetic `<span>` wrap; attrs still need
   forwarding.** The plugin stamps host elements, plain-identifier components
   (capitalized, `<Reveal as="h2">…`, `<Link>…`), **and one-level member tags**

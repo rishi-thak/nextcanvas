@@ -150,6 +150,13 @@ export default function TextPage() {
         only one string in the file.
       </p>
 
+      <p>
+        Native option labels, textarea content, and document title, script, and
+        style text are left alone. Edit that copy in source. Text directly inside
+        structural containers such as selects, lists, and table rows is also left
+        alone; ordinary text inside list items and table cells remains editable.
+      </p>
+
       <h2>What won&apos;t open an editor</h2>
       <ul>
         <li>

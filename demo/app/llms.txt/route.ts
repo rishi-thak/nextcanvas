@@ -49,6 +49,12 @@ local write-back server, which applies them with ts-morph.
 - Computed access (\`{items[i].x}\`), call results (\`{fn().y}\`)
 - Layout: nothing is created, deleted, reordered, or dragged
 
+Native option labels, textarea content, and document title/script/style text
+are left alone; edit them in source. Text directly inside structural containers
+(selects, lists, table rows) is also left alone. Text in list items and table cells
+remains editable. Inline fragments and component children inherit these limits;
+components defined elsewhere that return text cannot be classified by their callers.
+
 ## Not a fit for
 
 - **Letting non-technical teammates edit a deployed site.** nextcanvas is dev-only and localhost-only — it requires a cloned repo and a running \`next dev\`. For that job a headless CMS with visual editing, or a git-commit-based inline editor, is the correct answer.

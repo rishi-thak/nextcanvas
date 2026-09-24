@@ -72,6 +72,37 @@ struct DataLocStamper {
     /// Bare `{q}` / `{session.title}`'s base can resolve through prop-drill on
     /// the server. Pushed as a flat list of binding names per scope.
     component_params: Vec<Vec<String>>,
+    text_context: TextContext,
+}
+
+/// Constraints on synthetic HTML spans, not a validator for authored JSX.
+#[derive(Clone, Copy, PartialEq)]
+enum TextContext {
+    Normal,
+    RestrictedChildren,
+    TextOnly,
+}
+
+fn child_text_context(name: &JSXElementName, inherited: TextContext) -> TextContext {
+    // Fragments and components can pass children through without a DOM boundary.
+    // Keep text-only ancestry even through authored elements; do not add more
+    // invalid markup to an already-invalid subtree.
+    if inherited == TextContext::TextOnly {
+        return inherited;
+    }
+    match name {
+        JSXElementName::Ident(id) if !is_component_name(&id.sym) => match &*id.sym {
+            // Keep ordinary native selects compatible with React hydration, even
+            // on browsers that also support customizable rich option content.
+            "option" | "textarea" | "title" | "script" | "style" | "xmp"
+            | "iframe" | "noembed" | "noframes" | "plaintext" => TextContext::TextOnly,
+            "select" | "optgroup" | "table" | "thead" | "tbody" | "tfoot"
+            | "tr" | "colgroup" | "ul" | "ol" | "menu" | "dl" | "picture"
+            | "html" | "head" => TextContext::RestrictedChildren,
+            _ => TextContext::Normal,
+        },
+        _ => inherited,
+    }
 }
 
 /// Names that are almost never editable source copy when used as bare `{ident}`
@@ -613,7 +644,14 @@ impl VisitMut for DataLocStamper {
     }
 
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
-        node.visit_mut_children_with(self);
+        let inherited = self.text_context;
+        // JSX in attributes is a separate render value, not a DOM child.
+        self.text_context = TextContext::Normal;
+        node.opening.visit_mut_with(self);
+        let context = child_text_context(&node.opening.name, inherited);
+        self.text_context = context;
+        node.children.visit_mut_with(self);
+        self.text_context = inherited;
 
         if !is_stampable_tag(&node.opening.name) {
             return;
@@ -630,7 +668,7 @@ impl VisitMut for DataLocStamper {
         //     copy (`Hello …!`) becomes editable via the mixed-children path.
         // Skip entirely when the element is a sole-bound-text candidate
         // (`<p>{x}</p>`) — that is stamped directly below, not wrapped.
-        if editable_bound_text_expr(
+        if context == TextContext::Normal && editable_bound_text_expr(
             &node.children,
             &self.map_params,
             &self.component_params,
@@ -691,12 +729,12 @@ impl VisitMut for DataLocStamper {
 
         let attr_names = editable_string_attrs(&node.opening.attrs);
         let bound_names = editable_bound_attrs(&node.opening.attrs);
-        let bound_text = editable_bound_text_expr(
-            &node.children,
-            &self.map_params,
-            &self.component_params,
-        );
-        let has_text = has_editable_text(&node.children);
+        let bound_text = if context == TextContext::Normal {
+            editable_bound_text_expr(&node.children, &self.map_params, &self.component_params)
+        } else {
+            None
+        };
+        let has_text = context == TextContext::Normal && has_editable_text(&node.children);
         if !has_text && bound_text.is_none() && attr_names.is_empty() && bound_names.is_empty() {
             return;
         }
@@ -780,6 +818,7 @@ fn process(mut program: Program, metadata: TransformPluginProgramMetadata) -> Pr
         source_map: metadata.source_map,
         map_params: Vec::new(),
         component_params: Vec::new(),
+        text_context: TextContext::Normal,
     });
     program
 }
