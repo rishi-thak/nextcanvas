@@ -78,6 +78,10 @@ export default function RootLayout({ children }) {
 }
 \`\`\`
 
+TypeScript configs can keep their standard \`const nextConfig: NextConfig = {};\`
+annotation with \`import type { NextConfig } from 'next'\`, then export
+\`withCanvas(nextConfig)\`. No cast or \`satisfies\` workaround is needed.
+
 ### Verify
 
 Run \`next dev\`, load the app, and confirm the nextcanvas toolbar appears in the

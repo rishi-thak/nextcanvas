@@ -17,19 +17,8 @@
  * is a pure no-op: your config passes through untouched.
  */
 
+import type { NextConfig } from 'next';
 import { startServer, PORT } from './server';
-
-type SwcPlugin = [string, Record<string, unknown>];
-
-/**
- * Minimal shape of a Next config. Typed locally rather than importing
- * `NextConfig` from `next` so the package builds without `next` installed
- * (it's a peer dependency).
- */
-type NextConfig = Record<string, unknown> & {
-  env?: Record<string, string | undefined>;
-  experimental?: { swcPlugins?: SwcPlugin[] } & Record<string, unknown>;
-};
 
 /**
  * The prebuilt SWC plugin, expressed as a resolvable **package specifier** —
@@ -53,6 +42,8 @@ function pluginSpecifier(): string {
   return `${name}/swc/nextcanvas_swc.wasm`;
 }
 
+export function withCanvas<T extends NextConfig>(nextConfig: T): T;
+export function withCanvas(nextConfig?: NextConfig): NextConfig;
 export function withCanvas(nextConfig: NextConfig = {}): NextConfig {
   if (process.env.NODE_ENV !== 'development') {
     return nextConfig;

@@ -30,6 +30,9 @@ compile-time SWC plugin stamps source locations onto elements that have
 something editable; a browser overlay reads those stamps and posts changes to a
 local write-back server, which applies them with ts-morph.
 
+TypeScript setup supports Next's standard \`NextConfig\` annotation:
+\`export default withCanvas(nextConfig)\` needs no cast or workaround.
+
 ## What it can edit
 
 - Static JSX text, including text mixed with inline tags (\`<p>Hi <strong>there</strong></p>\`)

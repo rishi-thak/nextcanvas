@@ -432,6 +432,16 @@ server), then `npx nextcanvas init` to mount the overlay. No `.babelrc`.
 
 ## Non-obvious constraints (do not re-learn these the hard way)
 
+- **Use Next's real `NextConfig` type for `withCanvas`.** Import it with
+  `import type`; a local `Record<string, unknown>` rejects Next's interface
+  because it has no index signature. The generic overload preserves supplied
+  config types; the no-argument/undefined overload returns `NextConfig` without
+  inventing required extension fields. The import adds no runtime dependency,
+  but Next's declarations must be installed at build time (Next is already a
+  peer dependency). `test/next-config-types.test.js` compiles a consumer fixture
+  through the package export and emitted declarations; keep its negative cases.
+
+
 - **Never insert text spans in restricted native content.** `TextContext` in the
   SWC plugin suppresses text wrapping/stamping under native `option`, raw-text /
   text-only elements, and directly inside structural parents (select/list/table

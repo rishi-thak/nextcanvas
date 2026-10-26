@@ -100,6 +100,16 @@ module.exports = withCanvas({
   // your existing config
 });`}</code>
       </pre>
+      <p>
+        In <code>next.config.ts</code>, keep the standard Next config annotation:
+      </p>
+      <pre>
+        <code>{`import type { NextConfig } from 'next';
+import { withCanvas } from '@rishi-thak/nextcanvas/next';
+
+const nextConfig: NextConfig = {};
+export default withCanvas(nextConfig);`}</code>
+      </pre>
       <h3>2. Mount the overlay</h3>
       <pre>
         <code>{`// app/layout.tsx
